@@ -1,0 +1,22 @@
+# Ignore the full Godot engine source tree
+godot/
+
+# Ignore everything in godot_plugin except addons
+godot_plugin/*
+!godot_plugin/addons/
+!godot_plugin/addons/**
+
+# Python virtual env
+rag_service/.venv/
+
+# Usual OS/editor junk
+.vscode/
+.idea/
+*.log
+.DS_Store
+Thumbs.db
+
+*.env
+godot_knowledge_base/
+chroma_db/
+.venv/
