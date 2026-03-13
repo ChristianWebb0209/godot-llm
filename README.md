@@ -4,9 +4,15 @@ This repo contains:
 
 - `rag_service/` – FastAPI RAG backend + tools (scraper, project analyzer, indexers, tests).
 - `godot_plugin/addons/godot_ai_assistant/` – Godot editor plugin.
-- `godot_knowledge_base/` – Scraped docs + curated project code.
 
-This README is a **concise command cheatsheet** for working end‑to‑end.
+It does NOT contain:
+- godot_knowledge_base, required for RAG functionality. I am not including it because the data used to create it is not open source.
+
+A lot of the scripts are .ps1, so this repo is meant for windows. Converting these to bash wouldn't be too hard, though.
+
+## Linting
+
+Since LLMs aren't great at writing .gd code, it is recommended to build the latest godot stable version, and set up a script to lint (see gdlint.ps1), then set an LLM rule to lint every time they modify a .gd file.
 
 ---
 
@@ -65,9 +71,22 @@ The backend:
 
 - Uses **ChromaDB** (`chroma_db/`) as the vector store.
 - Pulls from:
-  - `docs` collection (scraped Godot docs).
-  - `project_code` collection (important scripts/shaders).
+  - `docs` collection – scraped **official Godot 4.x docs** (authoritative for APIs/engine behavior).
+  - `project_code` collection – example scripts/shaders from projects (patterns, not canonical).
 - Returns verbose answers with a **Reasoning** section and supporting snippets.
+
+HTTP endpoints:
+
+- `GET /health` → `{ "status": "ok" }`
+- `POST /query`
+  - Request: `QueryRequest` (see `CONTEXT.md` for full schema).
+  - Response:
+    - `answer: str` – markdown answer text.
+    - `snippets: List[SourceChunk]` – docs + code chunks used.
+    - `tool_calls: List[ToolCallResult]` – optional record of backend tools used.
+- `POST /query_stream`
+  - Same request body as `/query`.
+  - Streams back the answer text as plain UTF‑8 chunks so the Godot dock can display it incrementally.
 
 ---
 

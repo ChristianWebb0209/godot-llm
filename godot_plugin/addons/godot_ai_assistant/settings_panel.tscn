@@ -1,0 +1,156 @@
+[gd_scene load_steps=2 format=3 uid="uid://godot_ai_settings_panel"]
+
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/settings_panel.gd" id="1"]
+
+[node name="GodotAISettingsPanel" type="PopupPanel"]
+custom_minimum_size = Vector2(400, 420)
+script = ExtResource("1")
+
+[node name="Margin" type="MarginContainer" parent="."]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+theme_override_constants/margin_left = 12
+theme_override_constants/margin_top = 12
+theme_override_constants/margin_right = 12
+theme_override_constants/margin_bottom = 12
+
+[node name="Scroll" type="ScrollContainer" parent="Margin"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="VBox" type="VBoxContainer" parent="Margin/Scroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 8
+
+[node name="DisplaySection" type="VBoxContainer" parent="Margin/Scroll/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="DisplayLabel" type="Label" parent="Margin/Scroll/VBox/DisplaySection"]
+layout_mode = 2
+text = "Display"
+
+[node name="HSeparator" type="HSeparator" parent="Margin/Scroll/VBox/DisplaySection"]
+layout_mode = 2
+
+[node name="TextSizeRow" type="HBoxContainer" parent="Margin/Scroll/VBox/DisplaySection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/DisplaySection/TextSizeRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.4
+text = "Text size"
+
+[node name="TextSizeSpinBox" type="SpinBox" parent="Margin/Scroll/VBox/DisplaySection/TextSizeRow"]
+unique_name_in_owner = true
+layout_mode = 2
+min_value = 10.0
+max_value = 24.0
+value = 14.0
+
+[node name="WordWrapCheck" type="CheckButton" parent="Margin/Scroll/VBox/DisplaySection"]
+unique_name_in_owner = true
+layout_mode = 2
+button_pressed = true
+text = "Word wrap output"
+
+[node name="AISection" type="VBoxContainer" parent="Margin/Scroll/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 6
+
+[node name="AILabel" type="Label" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+text = "AI"
+
+[node name="HSeparator2" type="HSeparator" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+
+[node name="RagUrlRow" type="HBoxContainer" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/AISection/RagUrlRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "RAG service URL"
+
+[node name="RagUrlEdit" type="LineEdit" parent="Margin/Scroll/VBox/AISection/RagUrlRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "http://127.0.0.1:8000"
+
+[node name="ProviderRow" type="HBoxContainer" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/AISection/ProviderRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "Provider"
+
+[node name="ProviderOption" type="OptionButton" parent="Margin/Scroll/VBox/AISection/ProviderRow"]
+unique_name_in_owner = true
+layout_mode = 2
+item_count = 1
+selected = 0
+item_0/text = "OpenAI"
+
+[node name="ApiKeyRow" type="HBoxContainer" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/AISection/ApiKeyRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "OpenAI API key"
+
+[node name="ApiKeyEdit" type="LineEdit" parent="Margin/Scroll/VBox/AISection/ApiKeyRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "sk-..."
+secret = true
+
+[node name="BaseUrlRow" type="HBoxContainer" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/AISection/BaseUrlRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "Base URL (optional)"
+
+[node name="BaseUrlEdit" type="LineEdit" parent="Margin/Scroll/VBox/AISection/BaseUrlRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+placeholder_text = "https://api.openai.com/v1"
+
+[node name="ModelRow" type="HBoxContainer" parent="Margin/Scroll/VBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="Margin/Scroll/VBox/AISection/ModelRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "Model (main panel)"
+
+[node name="ModelOption" type="OptionButton" parent="Margin/Scroll/VBox/AISection/ModelRow"]
+unique_name_in_owner = true
+layout_mode = 2
+
+[node name="Buttons" type="HBoxContainer" parent="Margin/Scroll/VBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="SaveButton" type="Button" parent="Margin/Scroll/VBox/Buttons"]
+unique_name_in_owner = true
+layout_mode = 2
+text = "Save"

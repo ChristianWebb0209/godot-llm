@@ -70,9 +70,28 @@ Important subpaths:
       - `extra: Dict[str, Any]`.
     - `top_k: int = 5`.
   - Response model:
-    - `answer: str`.
+    - `answer: str` – markdown answer text.
     - `snippets: List[SourceChunk]`:
       - `id`, `source_path`, `score`, `text_preview`, `metadata`.
+    - `tool_calls: List[ToolCallResult]` (optional):
+      - `tool_name: str`
+      - `arguments: Dict[str, Any]`
+      - `output: Any`
+    - `context_usage: Dict` (optional):
+      - `model: str`
+      - `limit_tokens: int` (model context limit)
+      - `estimated_prompt_tokens: int` (cheap local estimate)
+      - `percent: float`
+
+- `POST /query_stream`:
+  - Same request body as `/query`.
+  - Streams back the answer text as plain UTF‑8 chunks so the Godot dock can
+    display it incrementally while the model is still generating.
+
+- `POST /query_stream_with_tools`:
+  - Streams answer text like `/query_stream`, then appends two sentinel blocks:
+    - `__TOOL_CALLS__` followed by JSON array of tool calls (so the editor can run them).
+    - `__USAGE__` followed by JSON `context_usage` (so the dock can update its UI).
 
 ### 3.2 Environment & OpenAI
 
@@ -95,6 +114,11 @@ Important subpaths:
     - Use `OpenAIEmbeddingFunction` with `OPENAI_EMBED_MODEL` for both collections.
   - If not:
     - Fall back to Chroma’s defaults (not recommended for production).
+
+> Implementation detail: if a collection already exists with a different
+> embedding configuration, the backend reuses the existing collection and logs
+> a warning, instead of crashing. To fully change embeddings, delete
+> `chroma_db/` and re-run the indexers (see §4.3).
 
 ### 3.4 Retrieval Strategy
 
@@ -140,6 +164,32 @@ Important subpaths:
       - Relevant code snippets (paths, importance, tags).
       - Obscure note (if applicable).
 
+### 3.5 Tools & Orchestration (`rag_service/app/services/tools.py`)
+
+- Backend tools are defined in `services/tools.py` as `ToolDef` objects with:
+  - `name: str`
+  - `description: str`
+  - `parameters: Dict[str, Any]` – JSON-schema-like parameter definitions.
+  - `handler(args: Dict[str, Any]) -> Any` – Python implementation.
+- Current tools:
+  - `search_docs`:
+    - Searches the `docs` collection for relevant documentation.
+    - Returns `id`, `path`, `score`, `metadata`, and `preview` text.
+  - `search_project_code`:
+    - Searches the `project_code` collection for relevant scripts/shaders.
+    - Optional `language` filter: `"gdscript"`, `"csharp"`, `"gdshader"`.
+    - Returns similar metadata + preview for each snippet.
+- The function `get_openai_tools_payload()` converts these `ToolDef`s into the
+  `tools=[...]` payload used with the OpenAI Responses API.
+- The `/query` endpoint uses `_run_query_with_tools` to:
+  - Run the initial RAG retrieval (docs + project_code).
+  - Call the model with both the RAG context and the tool manifest.
+  - Detect tool calls, execute them via `dispatch_tool_call`, and feed results
+    back into the model for up to a small, fixed number of rounds.
+- Today these tools operate only on collections (searching docs/code). Future
+  work will add tools that plan **editor actions** (text patches, file
+  creation, node renames) for the Godot plugin to execute.
+
 ---
 
 ## 4. ChromaDB Collections & Indexing
@@ -174,6 +224,17 @@ Important subpaths:
     - `language` – `"gdscript"`, `"csharp"`, `"gdshader"`.
     - `importance` – float.
     - `tags` – optional non-empty list if tags exist.
+
+#### 4.2.1 How the LLM should treat `docs` vs `project_code`
+
+- The **`docs` collection** is scraped from the **official Godot 4.x manuals**. It is the
+  **authoritative source** for engine behavior, APIs, and built-in classes.
+- The **`project_code` collection** contains **example scripts and shaders** from various projects.
+  These are meant as **patterns and inspiration**, not as canonical definitions of how the engine works.
+- When there is any tension between what the docs say and what project code seems to imply:
+  - The LLM should **prefer `docs`**.
+  - Project code is still valuable for idioms, patterns, and end-to-end examples, but must not
+    override the official documentation.
 
 ### 4.3 Clean Reset Procedure (Important)
 
@@ -304,13 +365,69 @@ In **all** modes:
     - Top: `TextEdit` for question.
     - Bottom: `RichTextLabel` for answer/snippets.
   - Control row:
-    - `Ask` button.
+    - `Ask` button (icon-only; disabled + shows loading icon while streaming).
     - `Copy` button → copies parsed answer text to clipboard.
+    - **Tools** checkbox: when checked, the dock uses `POST /query_stream_with_tools` so it can stream output *and* receive tool calls; tool calls with `execute_on_client: true` are run locally by `GodotAIEditorToolExecutor` (see §7.1).
     - Status label: short messages (`Ready`, `Sending...`, `Response received.`, `Nothing to copy.`, etc.).
+  - Context usage indicator:
+    - A compact label near the chat tabs shows estimated context usage (e.g. `Ctx: 2% (792/32768)`).
+  - History tab:
+    - Separate **History** tab (between Chat and Settings) shows SQLite-backed edit history + diffs and supports undo (see §7.2).
 - Users can **resize** input vs output via the splitter.
 - Copying output:
   - Uses `get_parsed_text()` to get plain text.
   - Uses `DisplayServer.clipboard_set(...)` to copy.
+- The plugin passes `EditorInterface` into the dock via `set_editor_interface()` so the executor can open scenes, add nodes, and save.
+
+### 7.1 Editor tools (client-side execution)
+
+- Backend defines these tools in `services/tools.py`; handlers return `{ "execute_on_client": true, "action": "<name>", ... }` so the plugin knows to run them.
+- **File / script tools** (executed in `editor_tool_executor.gd` via `FileAccess` and paths under `res://`):
+  - **create_file**: `path`, `content`, optional `overwrite`.
+  - **write_file**: `path`, `content` (overwrite entire file).
+  - **apply_patch**: `path`, `old_string`, `new_string` (first occurrence replaced).
+  - **create_script**: `path`, `language` (gdscript|csharp), optional `extends_class`, `initial_content`.
+- **Scene / node tools** (require `EditorInterface`: open scene, get root, add child, save):
+  - **create_node**: `scene_path`, `parent_path`, `node_type`, optional `node_name`. Adds a node of any Godot type to the given scene.
+  - **set_node_property**: `scene_path`, `node_path`, `property_name`, `value` (JSON: number, string, bool, or array for Vector2/Vector3).
+- Node tools run asynchronously (open scene → wait frame → get root → modify → save); the dock uses `execute_async()` and awaits each before updating status.
+
+### 7.2 Edit history (SQLite) + Undo
+
+- Backend stores structured history in a local SQLite DB:
+  - `rag_service/ai_history.db`
+- Tables (see also `todos/DB.md` for the intended model):
+  - `edit_events`: timestamp, actor, trigger, prompt_hash, summary
+  - `file_changes`: edit_id, file_path, change_type, unified diff, lines_added/lines_removed, old/new hashes, old_content/new_content
+- Endpoints:
+  - `POST /edit_events/create`: store an edit event + changes
+  - `GET /edit_events/list?limit=...`: list history with per-file diffs and added/removed counts
+  - `POST /edit_events/undo/{edit_id}`: returns tool calls to restore previous content via `write_file`
+- Plugin behavior:
+  - `editor_tool_executor.gd` returns an `edit_record` (old/new content) for file write/patch tools.
+  - `ai_dock.gd` posts those records to `/edit_events/create`.
+  - Undo in the History tab calls `/edit_events/undo/{id}` and executes the returned tool calls.
+
+---
+
+## 10. Context builder (efficient prompt assembly)
+
+- Goal: only send what’s necessary; stable ordering; budget-aware trimming.
+- Model context limits live in `rag_service/app/context_builder.py` (e.g. `gpt-4.1-mini` uses a conservative `32768`).
+- The backend assembles ordered blocks with per-block budgets:
+  - System instructions → Current task → Active file → Related files (structural proximity) → Recent edits (recency working set) → Errors → Retrieved knowledge → Optional extras
+- Active file handling:
+  - The plugin sends `context.current_script` and may send `context.extra.active_file_text`.
+  - The plugin always sends `context.extra.project_root_abs` so the backend can read project files directly from disk (playground/local assumption).
+  - If `active_file_text` is missing, the backend reads the active file from disk.
+- Structural proximity:
+  - Backend scans the active file text for referenced `res://...` paths and includes up to a few related files as a separate block.
+- Recency working set:
+  - Backend pulls recent diffs from SQLite and includes them as lightweight context.
+- Compression vs truncation:
+  - When a block is far over budget, the backend uses a cheap local “compression” fallback (key symbols + head/tail windows) instead of random truncation.
+- Debugging:
+  - Backend logs the full input payload sent to the LLM with `[llm_input] ...` (printing is made Windows-console-safe).
 
 ---
 
@@ -322,27 +439,27 @@ In **all** modes:
   - Single entrypoint for:
     - `scrape_docs`, `index_docs`, `analyze_project`.
     - `chroma_status`, `rag_tests`, `chroma_visualize`.
-- `chroma-status.sh`:
-  - Quick status of collections + sample docs.
-- `chroma_visualize.py`:
+- `scripts/testing/chroma-status.ps1`:
+  - Windows-friendly status script for collections + sample docs.
+- `scripts/testing/chroma_visualize.py`:
   - Browser-based viewer for documents and metadata.
-- `run_e2e_rag_tests.sh`:
+- `scripts/testing/run_e2e_rag_tests.ps1`:
   - End-to-end test harness:
-    - Validates OpenAI key/quota.
+    - Validates OpenAI key/quota (if configured).
     - Spins up backend.
     - Hits `/query` with representative questions.
-    - Logs everything to `tools/testing/logs/`.
+    - Logs everything to `scripts/testing/logs/` (if configured there).
+- `scripts/testing/run_tool_usage_tests.py` + `run_tool_usage_tests.ps1`:
+  - Sends a small battery of prompts to `/query` to verify that:
+    - Explicit tool usage instructions (e.g. “use `search_docs`”) result in
+      corresponding tool calls.
+    - The model can also decide to call tools on its own for certain queries.
 
 ---
 
 ## 9. Open Questions / Future Work (for Future LLMs)
 
-- **Editor integration for edits**:
-  - Current system is read-only; future work should define a **very small, safe set of editor “tools”** for the LLM.
-  - Candidate tools:
-    - Apply text patch to current script.
-    - Create a script file from a template.
-    - Add/rename nodes in current scene using Undo/Redo.
+- **Editor tools** are implemented: create_file, write_file, apply_patch, create_script, create_node, set_node_property. Future work could add Undo/Redo integration, or tools that operate on the “current” script/scene (infer from editor state).
 - **Better tagging / roles**:
   - Expand tags beyond basic player/enemy/UI to cover common patterns (camera, inventory, dialogue, VFX).
 - **Shader-specific insights**:

@@ -1,0 +1,19 @@
+# RAG Expansions:
+
+The first big upgrade most RAG systems need is API structure rather than prose documentation. Docs describe APIs narratively, but the engine actually has a formal structure: classes, inheritance trees, methods, signals, and properties. For example, knowing that CharacterBody2D inherits from PhysicsBody2D dramatically narrows what code patterns make sense. Extracting the class hierarchy from the engine’s XML API dump and storing it as structured data gives the model something closer to a semantic map of the engine.
+
+Another highly valuable data source is editor patterns. Many Godot workflows involve scene graphs rather than pure scripting. Nodes, signals, resources, and scene hierarchies define behavior as much as the code does. Indexing scene files (.tscn) and learning patterns like “player controller scene structures” or “enemy AI node setups” gives the model context it rarely gets from code alone. Humans tend to think in those patterns when building games.
+
+A surprisingly powerful dataset is error examples. When people write Godot code, they encounter the same compiler errors repeatedly: invalid node paths, incorrect signal connections, mismatched types. If your RAG system contains examples of those errors paired with fixes, the model becomes far better at debugging its own output. That turns retrieval from “find examples” into “find precedents for fixing mistakes.”
+
+Then there’s something most RAG builders overlook: Q&A knowledge. The Godot ecosystem has years of developer questions scattered across forums, GitHub issues, and Stack Overflow. That material contains exactly the kinds of edge cases developers run into. When someone asks “why doesn’t my signal fire?” and another developer answers with a fix, that exchange is incredibly valuable training data for retrieval.
+
+Another layer that dramatically improves results is code summaries. Raw code embeddings are noisy because syntax dominates the token distribution. If each script in your index also has a short summary—something like “implements 2D player movement with acceleration and jumping using CharacterBody2D”—the embeddings become far more semantically meaningful. In practice many high-end code RAG systems embed both the raw code and the summary.
+
+A more advanced trick involves design pattern extraction. In Godot projects you’ll repeatedly see patterns like state machines for AI, component-style scripts attached to nodes, signal-driven event systems, or finite-state animation controllers. If your indexing process clusters and labels these patterns, the model can retrieve examples that match the architectural intent of the user’s request rather than just keyword similarity.
+
+Another dataset that pays dividends is plugin source code. Editor plugins demonstrate how to interact with the editor API, build docks, manipulate scenes, and extend tooling. Since you’re building an AI plugin yourself, indexing plugin repositories gives the model far better examples of editor integration than typical gameplay projects provide.
+
+Testing data is also surprisingly useful. Unit tests and integration tests reveal expected behavior in very explicit terms: inputs, outputs, and assertions. For an LLM trying to infer what a function should do, tests are sometimes clearer than the implementation itself.
+
+Finally there’s something a bit more experimental but extremely powerful: structured metadata about each script. Your filter already adds tags and importance values. If it can also capture things like “node types used,” “signals emitted,” “dependencies between scripts,” and “common usage contexts,” retrieval becomes more like querying a knowledge graph than searching a pile of text. When the system knows that a script manipulates NavigationAgent3D, it can pull in other navigation-related examples automatically.

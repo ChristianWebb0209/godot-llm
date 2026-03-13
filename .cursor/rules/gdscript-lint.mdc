@@ -1,0 +1,27 @@
+---
+description: Lint GDScript after editing; run gdlint on any touched .gd file
+globs: "**/*.gd"
+alwaysApply: false
+---
+
+# GDScript: Lint After Editing
+
+Whenever you create or modify any `.gd` file in this project, you **must** run the project's Godot linter and fix any reported errors.
+
+## How to lint
+
+From the repo root or from `rag_service`:
+
+```powershell
+cd rag_service
+.\scripts\gdlint.ps1 -Files "..\godot_plugin\addons\godot_ai_assistant\<filename>.gd"
+```
+
+- Lint **every .gd file you changed** in the same session (pass multiple `-Files` if needed).
+- Results are written to `rag_service/gdscript_errors.txt`. Address any errors before considering the task done.
+- Godot must be available (see `rag_service/scripts/gdlint.ps1` for path/PATH requirements).
+
+## Checklist
+
+- [ ] After editing any `.gd` file, run `gdlint.ps1` on that file (and any other modified .gd files).
+- [ ] Fix any issues reported in `gdscript_errors.txt`.

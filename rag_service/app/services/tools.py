@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from ..main import SourceChunk, _collect_top_docs, _collect_code_results
+from ..rag_core import SourceChunk, _collect_top_docs, _collect_code_results
 
 
 @dataclass
@@ -53,6 +53,156 @@ def _tool_search_project_code(args: Dict[str, Any]) -> Dict[str, Any]:
             for s in snippets
         ]
     }
+
+
+# --- Editor tools: executed on the Godot client; backend returns payload only ---
+
+def _editor_payload(name: str, **kwargs: Any) -> Dict[str, Any]:
+    """Return a payload that the Godot plugin will execute locally."""
+    out: Dict[str, Any] = {"execute_on_client": True, "action": name}
+    out.update(kwargs)
+    return out
+
+
+def _tool_create_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    content = args.get("content", "")
+    overwrite = bool(args.get("overwrite", False))
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("create_file", path=path, content=content, overwrite=overwrite)
+
+
+def _tool_write_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    content = args.get("content", "")
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("write_file", path=path, content=content)
+
+
+def _tool_apply_patch(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    old_string = args.get("old_string", "")
+    new_string = args.get("new_string", "")
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload(
+        "apply_patch", path=path, old_string=old_string, new_string=new_string
+    )
+
+
+def _tool_create_script(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    language = (args.get("language") or "gdscript").strip().lower()
+    extends_class = (args.get("extends_class") or "Node").strip()
+    initial_content = args.get("initial_content", "")
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    if language not in ("gdscript", "csharp"):
+        return {"error": "language must be gdscript or csharp", "execute_on_client": False}
+    return _editor_payload(
+        "create_script",
+        path=path,
+        language=language,
+        extends_class=extends_class,
+        initial_content=initial_content,
+    )
+
+
+def _tool_create_node(args: Dict[str, Any]) -> Dict[str, Any]:
+    scene_path = (args.get("scene_path") or "").strip()
+    parent_path = (args.get("parent_path") or "/root").strip()
+    node_type = (args.get("node_type") or "Node").strip()
+    node_name = (args.get("node_name") or "").strip()
+    if not scene_path:
+        return {"error": "scene_path is required", "execute_on_client": False}
+    if not node_type:
+        return {"error": "node_type is required", "execute_on_client": False}
+    return _editor_payload(
+        "create_node",
+        scene_path=scene_path,
+        parent_path=parent_path,
+        node_type=node_type,
+        node_name=node_name or None,
+    )
+
+
+def _tool_set_node_property(args: Dict[str, Any]) -> Dict[str, Any]:
+    scene_path = (args.get("scene_path") or "").strip()
+    node_path = (args.get("node_path") or "").strip()
+    property_name = (args.get("property_name") or "").strip()
+    value = args.get("value")
+    if not scene_path or not node_path or not property_name:
+        return {
+            "error": "scene_path, node_path, and property_name are required",
+            "execute_on_client": False,
+        }
+    return _editor_payload(
+        "set_node_property",
+        scene_path=scene_path,
+        node_path=node_path,
+        property_name=property_name,
+        value=value,
+    )
+
+
+def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("read_file", path=path)
+
+
+def _tool_delete_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("delete_file", path=path)
+
+
+def _tool_list_directory(args: Dict[str, Any]) -> Dict[str, Any]:
+    path = (args.get("path") or "res://").strip() or "res://"
+    recursive = bool(args.get("recursive", False))
+    max_entries = int(args.get("max_entries", 250))
+    max_depth = int(args.get("max_depth", 6))
+    if max_entries < 1:
+        max_entries = 1
+    if max_entries > 2000:
+        max_entries = 2000
+    if max_depth < 0:
+        max_depth = 0
+    if max_depth > 20:
+        max_depth = 20
+    return _editor_payload(
+        "list_directory",
+        path=path,
+        recursive=recursive,
+        max_entries=max_entries,
+        max_depth=max_depth,
+    )
+
+
+def _tool_search_files(args: Dict[str, Any]) -> Dict[str, Any]:
+    query = str(args.get("query") or "").strip()
+    root_path = str(args.get("root_path") or "res://").strip() or "res://"
+    extensions = args.get("extensions") or []
+    max_matches = int(args.get("max_matches", 50))
+    if not query:
+        return {"error": "query is required", "execute_on_client": False}
+    if max_matches < 1:
+        max_matches = 1
+    if max_matches > 500:
+        max_matches = 500
+    if not isinstance(extensions, list):
+        extensions = []
+    return _editor_payload(
+        "search_files",
+        query=query,
+        root_path=root_path,
+        extensions=extensions,
+        max_matches=max_matches,
+    )
 
 
 def get_registered_tools() -> List[ToolDef]:
@@ -112,27 +262,175 @@ def get_registered_tools() -> List[ToolDef]:
             },
             handler=_tool_search_project_code,
         ),
-        # Future: add Godot editor-facing tools here, e.g.:
-        # - summarize_current_scene
-        # - plan_editor_actions
+        # --- Editor tools (executed on Godot client) ---
+        ToolDef(
+            name="create_file",
+            description=(
+                "Create a new file in the project. Use a project path like res://scripts/name.gd. "
+                "If overwrite is false, the file must not exist."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
+                    "content": {"type": "string", "description": "Full file content.", "default": ""},
+                    "overwrite": {"type": "boolean", "description": "Overwrite if exists.", "default": False},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_create_file,
+        ),
+        ToolDef(
+            name="write_file",
+            description="Overwrite a file with new content. Creates the file if it does not exist.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
+                    "content": {"type": "string", "description": "Full file content."},
+                },
+                "required": ["path", "content"],
+            },
+            handler=_tool_write_file,
+        ),
+        ToolDef(
+            name="apply_patch",
+            description=(
+                "Edit a file by replacing the first occurrence of old_string with new_string. "
+                "Use for small, targeted edits in scripts or scenes."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path to the file."},
+                    "old_string": {"type": "string", "description": "Exact text to find and replace."},
+                    "new_string": {"type": "string", "description": "Replacement text."},
+                },
+                "required": ["path", "old_string", "new_string"],
+            },
+            handler=_tool_apply_patch,
+        ),
+        ToolDef(
+            name="create_script",
+            description=(
+                "Create a new GDScript or C# script file with an optional extends line and initial content."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/player.gd"},
+                    "language": {"type": "string", "description": "gdscript or csharp", "default": "gdscript"},
+                    "extends_class": {"type": "string", "description": "Base class, e.g. Node, CharacterBody2D", "default": "Node"},
+                    "initial_content": {"type": "string", "description": "Optional body content.", "default": ""},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_create_script,
+        ),
+        ToolDef(
+            name="create_node",
+            description=(
+                "Add a new node (component) to a scene. node_type can be any Godot type (Node, Node2D, Button, etc.). "
+                "parent_path is the path inside the scene, e.g. /root/Main/World."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "Scene file path, e.g. res://main.tscn"},
+                    "parent_path": {"type": "string", "description": "Node path of parent in scene, e.g. /root/Main", "default": "/root"},
+                    "node_type": {"type": "string", "description": "Godot class name: Node, Node2D, Button, CharacterBody2D, etc."},
+                    "node_name": {"type": "string", "description": "Optional name for the new node."},
+                },
+                "required": ["scene_path", "node_type"],
+            },
+            handler=_tool_create_node,
+        ),
+        ToolDef(
+            name="set_node_property",
+            description=(
+                "Set a property on a node in a scene. value is JSON (number, string, boolean, or array for Vector2/Vector3)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "Scene file path, e.g. res://main.tscn"},
+                    "node_path": {"type": "string", "description": "Path to the node inside the scene."},
+                    "property_name": {"type": "string", "description": "Property name, e.g. position, text, visible"},
+                    "value": {"description": "New value (number, string, bool, or [x,y] / [x,y,z] for vectors)."},
+                },
+                "required": ["scene_path", "node_path", "property_name", "value"],
+            },
+            handler=_tool_set_node_property,
+        ),
+        ToolDef(
+            name="read_file",
+            description="Read the contents of a project file (res://...).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_read_file,
+        ),
+        ToolDef(
+            name="delete_file",
+            description="Delete a file from the project (res://...).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/old.gd"},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_delete_file,
+        ),
+        ToolDef(
+            name="list_directory",
+            description="List files and folders in a directory under res://.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory path, e.g. res:// or res://scripts", "default": "res://"},
+                    "recursive": {"type": "boolean", "description": "List recursively.", "default": False},
+                    "max_entries": {"type": "integer", "description": "Max number of returned entries.", "default": 250, "minimum": 1, "maximum": 2000},
+                    "max_depth": {"type": "integer", "description": "Max recursion depth if recursive.", "default": 6, "minimum": 0, "maximum": 20},
+                },
+            },
+            handler=_tool_list_directory,
+        ),
+        ToolDef(
+            name="search_files",
+            description="Search for a text query inside project files under res://.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Text to search for."},
+                    "root_path": {"type": "string", "description": "Directory to search under.", "default": "res://"},
+                    "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional extension filters like ['.gd','.tscn'].", "default": []},
+                    "max_matches": {"type": "integer", "description": "Max number of file matches.", "default": 50, "minimum": 1, "maximum": 500},
+                },
+                "required": ["query"],
+            },
+            handler=_tool_search_files,
+        ),
     ]
 
 
 def get_openai_tools_payload() -> List[Dict[str, Any]]:
     """
     Convert internal ToolDef objects into the 'tools' payload expected by
-    OpenAI tool-calling APIs.
+    OpenAI Responses tool-calling APIs.
     """
     tools_payload: List[Dict[str, Any]] = []
     for t in get_registered_tools():
         tools_payload.append(
             {
                 "type": "function",
-                "function": {
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                },
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
             }
         )
     return tools_payload
