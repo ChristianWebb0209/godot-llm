@@ -110,8 +110,17 @@ def _tool_create_script(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
+def _normalize_scene_path(path: str) -> str:
+    p = (path or "").strip()
+    if not p:
+        return p
+    if not p.startswith("res://"):
+        p = "res://" + p
+    return p
+
+
 def _tool_create_node(args: Dict[str, Any]) -> Dict[str, Any]:
-    scene_path = (args.get("scene_path") or "").strip()
+    scene_path = _normalize_scene_path(args.get("scene_path") or "")
     parent_path = (args.get("parent_path") or "/root").strip()
     node_type = (args.get("node_type") or "Node").strip()
     node_name = (args.get("node_name") or "").strip()
@@ -128,23 +137,56 @@ def _tool_create_node(args: Dict[str, Any]) -> Dict[str, Any]:
     )
 
 
-def _tool_set_node_property(args: Dict[str, Any]) -> Dict[str, Any]:
-    scene_path = (args.get("scene_path") or "").strip()
-    node_path = (args.get("node_path") or "").strip()
-    property_name = (args.get("property_name") or "").strip()
+def _tool_modify_attribute(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Generic tool to set an attribute/property. Use target_type to choose what to modify:
+    - node: a property on a node in a scene (scene_path, node_path, attribute, value).
+    - import: a key in the [params] section of a resource's .import file (path, attribute, value).
+    """
+    target_type = str(args.get("target_type") or "").strip().lower()
+    attribute = str(args.get("attribute") or "").strip()
     value = args.get("value")
-    if not scene_path or not node_path or not property_name:
+    if not target_type or not attribute:
         return {
-            "error": "scene_path, node_path, and property_name are required",
+            "error": "target_type and attribute are required",
             "execute_on_client": False,
         }
-    return _editor_payload(
-        "set_node_property",
-        scene_path=scene_path,
-        node_path=node_path,
-        property_name=property_name,
-        value=value,
-    )
+    if value is None:
+        return {"error": "value is required", "execute_on_client": False}
+    if target_type == "node":
+        scene_path = _normalize_scene_path(args.get("scene_path") or "")
+        node_path = (args.get("node_path") or "").strip()
+        if not scene_path or not node_path:
+            return {
+                "error": "For target_type=node, scene_path and node_path are required",
+                "execute_on_client": False,
+            }
+        return _editor_payload(
+            "modify_attribute",
+            target_type="node",
+            scene_path=scene_path,
+            node_path=node_path,
+            attribute=attribute,
+            value=value,
+        )
+    if target_type == "import":
+        path = str(args.get("path") or "").strip()
+        if not path:
+            return {
+                "error": "For target_type=import, path is required (e.g. res://icon.svg)",
+                "execute_on_client": False,
+            }
+        return _editor_payload(
+            "modify_attribute",
+            target_type="import",
+            path=path,
+            attribute=attribute,
+            value=value,
+        )
+    return {
+        "error": "target_type must be 'node' or 'import'",
+        "execute_on_client": False,
+    }
 
 
 def _tool_read_file(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -159,6 +201,14 @@ def _tool_delete_file(args: Dict[str, Any]) -> Dict[str, Any]:
     if not path:
         return {"error": "path is required", "execute_on_client": False}
     return _editor_payload("delete_file", path=path)
+
+
+def _tool_lint_file(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run the Godot linter on a project file. Executed on the client; result is shown in the editor."""
+    path = (args.get("path") or "").strip()
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("lint_file", path=path)
 
 
 def _tool_list_directory(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -203,6 +253,37 @@ def _tool_search_files(args: Dict[str, Any]) -> Dict[str, Any]:
         extensions=extensions,
         max_matches=max_matches,
     )
+
+
+def _tool_list_files(args: Dict[str, Any]) -> Dict[str, Any]:
+    """List file paths under res:// by optional extension(s), no content search (glob-style)."""
+    path = str(args.get("path") or "res://").strip() or "res://"
+    recursive = bool(args.get("recursive", True))
+    extensions = args.get("extensions") or []
+    max_entries = int(args.get("max_entries", 500))
+    if max_entries < 1:
+        max_entries = 1
+    if max_entries > 2000:
+        max_entries = 2000
+    if not isinstance(extensions, list):
+        extensions = []
+    return _editor_payload(
+        "list_files",
+        path=path,
+        recursive=recursive,
+        extensions=extensions,
+        max_entries=max_entries,
+    )
+
+
+def _tool_read_import_options(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Read the .import file for a resource (e.g. res://icon.svg). Returns full content or params section."""
+    path = str(args.get("path") or "").strip()
+    if not path:
+        return {"error": "path is required", "execute_on_client": False}
+    return _editor_payload("read_import_options", path=path)
+
+
 
 
 def get_registered_tools() -> List[ToolDef]:
@@ -330,15 +411,18 @@ def get_registered_tools() -> List[ToolDef]:
         ToolDef(
             name="create_node",
             description=(
-                "Add a new node (component) to a scene. node_type can be any Godot type (Node, Node2D, Button, etc.). "
-                "parent_path is the path inside the scene, e.g. /root/Main/World."
+                "Add a new node to a scene. Executes in the Godot editor: opens the scene, adds the node, saves. "
+                "node_type MUST be a built-in Godot class (Node, Node2D, Node3D, Control, Button, Label, "
+                "CharacterBody2D, Sprite2D, etc.). Do NOT use 'Component'—Godot has no Component class; use Node "
+                "or Node2D and attach a script via create_script if you need custom behavior. "
+                "scene_path: res:// path to .tscn file. parent_path: path inside the scene tree, e.g. /root or /root/Main."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "scene_path": {"type": "string", "description": "Scene file path, e.g. res://main.tscn"},
-                    "parent_path": {"type": "string", "description": "Node path of parent in scene, e.g. /root/Main", "default": "/root"},
-                    "node_type": {"type": "string", "description": "Godot class name: Node, Node2D, Button, CharacterBody2D, etc."},
+                    "scene_path": {"type": "string", "description": "Scene file path, e.g. res://main.tscn or main.tscn"},
+                    "parent_path": {"type": "string", "description": "Node path of parent in scene, e.g. /root or /root/Main", "default": "/root"},
+                    "node_type": {"type": "string", "description": "Built-in Godot class only: Node, Node2D, Button, Label, CharacterBody2D, Sprite2D, etc."},
                     "node_name": {"type": "string", "description": "Optional name for the new node."},
                 },
                 "required": ["scene_path", "node_type"],
@@ -346,29 +430,41 @@ def get_registered_tools() -> List[ToolDef]:
             handler=_tool_create_node,
         ),
         ToolDef(
-            name="set_node_property",
+            name="modify_attribute",
             description=(
-                "Set a property on a node in a scene. value is JSON (number, string, boolean, or array for Vector2/Vector3)."
+                "Set an attribute/property on a target. Use target_type to choose: "
+                "'node' = property on a node in a scene (scene_path, node_path, attribute, value); "
+                "'import' = key in the .import file [params] for a resource (path, attribute, value). "
+                "Examples: node position, text; import compress (SVG lossless), mipmaps."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "scene_path": {"type": "string", "description": "Scene file path, e.g. res://main.tscn"},
-                    "node_path": {"type": "string", "description": "Path to the node inside the scene."},
-                    "property_name": {"type": "string", "description": "Property name, e.g. position, text, visible"},
-                    "value": {"description": "New value (number, string, bool, or [x,y] / [x,y,z] for vectors)."},
+                    "target_type": {"type": "string", "description": "Either 'node' or 'import'."},
+                    "attribute": {"type": "string", "description": "Property/key name (e.g. position, compress, text)."},
+                    "value": {"description": "New value (number, string, bool, or [x,y] for vectors)."},
+                    "scene_path": {"type": "string", "description": "Required if target_type=node. Scene file path, e.g. res://main.tscn"},
+                    "node_path": {"type": "string", "description": "Required if target_type=node. Path to the node inside the scene, e.g. /root/Sprite"},
+                    "path": {"type": "string", "description": "Required if target_type=import. Resource path, e.g. res://icon.svg"},
                 },
-                "required": ["scene_path", "node_path", "property_name", "value"],
+                "required": ["target_type", "attribute", "value"],
             },
-            handler=_tool_set_node_property,
+            handler=_tool_modify_attribute,
         ),
         ToolDef(
             name="read_file",
-            description="Read the contents of a project file (res://...).",
+            description=(
+                "Read the full contents of a project file. Use this whenever you need to see the current "
+                "content of a file (e.g. before editing, or when the user asks what's in a file). "
+                "You will receive the file content in the tool result. Path must be under res://, e.g. res://scripts/player.gd."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
+                    "path": {
+                        "type": "string",
+                        "description": "Project path, e.g. res://scripts/foo.gd or res://player.gd. Must start with res:// or be under the project.",
+                    },
                 },
                 "required": ["path"],
             },
@@ -402,11 +498,11 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="search_files",
-            description="Search for a text query inside project files under res://.",
+            description="Search for a text query inside project files under res:// (grep: finds files containing the text).",
             parameters={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Text to search for."},
+                    "query": {"type": "string", "description": "Text to search for inside files."},
                     "root_path": {"type": "string", "description": "Directory to search under.", "default": "res://"},
                     "extensions": {"type": "array", "items": {"type": "string"}, "description": "Optional extension filters like ['.gd','.tscn'].", "default": []},
                     "max_matches": {"type": "integer", "description": "Max number of file matches.", "default": 50, "minimum": 1, "maximum": 500},
@@ -414,6 +510,53 @@ def get_registered_tools() -> List[ToolDef]:
                 "required": ["query"],
             },
             handler=_tool_search_files,
+        ),
+        ToolDef(
+            name="list_files",
+            description=(
+                "List file paths under res:// by optional extension(s), without searching file contents. "
+                "Use this to find all files of a type (e.g. all .svg, .png, .tscn). Returns paths only."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Directory to list, e.g. res:// or res://assets", "default": "res://"},
+                    "recursive": {"type": "boolean", "description": "List recursively.", "default": True},
+                    "extensions": {"type": "array", "items": {"type": "string"}, "description": "Filter by extension, e.g. ['.svg'], ['.png','.jpg']. Omit for all files.", "default": []},
+                    "max_entries": {"type": "integer", "description": "Max paths to return.", "default": 500, "minimum": 1, "maximum": 2000},
+                },
+            },
+            handler=_tool_list_files,
+        ),
+        ToolDef(
+            name="read_import_options",
+            description=(
+                "Read the .import file for a resource (e.g. res://icon.svg). Returns the file content so you can see current import options. "
+                "Import options control how Godot imports assets (e.g. SVG compression, texture mipmaps)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Resource path, e.g. res://icon.svg (the .import file read is path.import)."},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_read_import_options,
+        ),
+        ToolDef(
+            name="lint_file",
+            description=(
+                "Run the Godot script linter on a project file (e.g. res://player.gd). "
+                "Use when the user asks to lint a file or check for errors. The linter output is shown in the editor."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Project path to the script, e.g. res://scripts/foo.gd"},
+                },
+                "required": ["path"],
+            },
+            handler=_tool_lint_file,
         ),
     ]
 

@@ -49,10 +49,8 @@ def get_chroma_client() -> chromadb.PersistentClient:
     try:
         _docs_collection = _chroma_client.get_collection("docs")
         if embedding_fn is not None:
-            print(
-                "[chroma] WARNING: 'docs' collection already exists with a "
-                "different embedding configuration; reusing existing collection."
-            )
+            from .console_log import yellow, dim
+            print(yellow("chroma") + " " + dim("'docs' exists with different embedding; reusing."))
     except Exception:
         _docs_collection = _chroma_client.get_or_create_collection(
             name="docs", embedding_function=embedding_fn
@@ -61,10 +59,8 @@ def get_chroma_client() -> chromadb.PersistentClient:
     try:
         _code_collection = _chroma_client.get_collection("project_code")
         if embedding_fn is not None:
-            print(
-                "[chroma] WARNING: 'project_code' collection already exists with a "
-                "different embedding configuration; reusing existing collection."
-            )
+            from .console_log import yellow, dim
+            print(yellow("chroma") + " " + dim("'project_code' exists with different embedding; reusing."))
     except Exception:
         _code_collection = _chroma_client.get_or_create_collection(
             name="project_code", embedding_function=embedding_fn

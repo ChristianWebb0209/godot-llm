@@ -4,6 +4,52 @@ class_name GodotAIEditStore
 
 const STORE_PATH := "user://godot_ai_assistant_edits.json"
 
+## --- Editor styling: markers shown in script tabs, FileSystem tree, Scene tree ---
+## Staged/change indicators so user sees what was added, modified, removed, or failed.
+const FILE_MARKER_CREATED := "🟢 "   ## New file / just created
+const FILE_MARKER_MODIFIED := "🟡 "  ## Modified
+const FILE_MARKER_DELETED := "⚫ "   ## Deleted
+const FILE_MARKER_FAILED := "🔴 "    ## Lint/edit failed
+const NODE_MARKER_CREATED := "🧩 "   ## Component/node just created
+const NODE_MARKER_MODIFIED := "🟡 "  ## Node property changed
+
+## All markers (for stripping when re-applying decorations)
+const _FILE_MARKERS: Array = ["🟢 ", "🟡 ", "⚫ ", "🔴 "]
+const _NODE_MARKERS: Array = ["🧩 ", "🟡 "]
+
+## --- Editor action type constants (unified for chat, timeline, and history) ---
+const ACTION_CREATE_FILE := "create_file"
+const ACTION_WRITE_FILE := "write_file"
+const ACTION_APPLY_PATCH := "apply_patch"
+const ACTION_CREATE_SCRIPT := "create_script"
+const ACTION_DELETE_FILE := "delete_file"
+const ACTION_CREATE_NODE := "create_node"
+const ACTION_SET_NODE_PROPERTY := "set_node_property"
+const ACTION_SET_IMPORT_OPTION := "set_import_option"
+
+## action_type -> { icon: String, label: String }
+const _ACTION_DISPLAY: Dictionary = {
+	ACTION_CREATE_FILE: {"icon": "📄", "label": "Add file"},
+	ACTION_WRITE_FILE: {"icon": "✏️", "label": "Write file"},
+	ACTION_APPLY_PATCH: {"icon": "🔧", "label": "Patch"},
+	ACTION_CREATE_SCRIPT: {"icon": "📜", "label": "Create script"},
+	ACTION_DELETE_FILE: {"icon": "🗑️", "label": "Delete file"},
+	ACTION_CREATE_NODE: {"icon": "🧩", "label": "Create component"},
+	ACTION_SET_NODE_PROPERTY: {"icon": "⚙️", "label": "Set property"},
+	ACTION_SET_IMPORT_OPTION: {"icon": "⚙️", "label": "Set import option"},
+}
+
+
+static func get_action_icon(action_type: String) -> String:
+	var d = GodotAIEditStore._ACTION_DISPLAY.get(action_type, {})
+	return d.get("icon", "📌") if d is Dictionary else "📌"
+
+
+static func get_action_label(action_type: String) -> String:
+	var d = GodotAIEditStore._ACTION_DISPLAY.get(action_type, {})
+	return d.get("label", action_type) if d is Dictionary else str(action_type)
+
+
 ## file_status: path -> { status, last_edit_id, updated_unix }
 var file_status: Dictionary = {}
 
@@ -33,7 +79,11 @@ func load_from_disk() -> void:
 	if typeof(j.data) != TYPE_DICTIONARY:
 		return
 	var d: Dictionary = j.data
-	file_status = d.get("file_status", {}) if d.get("file_status", {}) is Dictionary else {}
+	var raw_file_status = d.get("file_status", {})
+	file_status = {}
+	if raw_file_status is Dictionary:
+		for key in raw_file_status.keys():
+			file_status[normalize_to_res_path(str(key))] = raw_file_status[key]
 	node_status = d.get("node_status", {}) if d.get("node_status", {}) is Dictionary else {}
 	events = d.get("events", []) if d.get("events", []) is Array else []
 	pending = d.get("pending", []) if d.get("pending", []) is Array else []
@@ -95,15 +145,17 @@ func reject_pending(id: String) -> Dictionary:
 	return {}
 
 
-func add_applied_file_change(change: Dictionary, lint_ok: bool = true) -> void:
-	# change: { file_path, change_type, old_content, new_content, summary }
+func add_applied_file_change(change: Dictionary, lint_ok: bool = true, action_type: String = "") -> void:
+	# change: { file_path, change_type, old_content, new_content, summary, action_type? }
 	var rec := change.duplicate(true)
 	rec["lint_ok"] = lint_ok
+	if not action_type.is_empty():
+		rec["action_type"] = action_type
 	_add_event_from_change(rec, false)
 	save_to_disk()
 
 
-func add_node_change(scene_path: String, node_path: String, status: String, summary: String) -> void:
+func add_node_change(scene_path: String, node_path: String, status: String, summary: String, action_type: String = "") -> void:
 	var id := _new_id()
 	var rec := {
 		"id": id,
@@ -114,6 +166,8 @@ func add_node_change(scene_path: String, node_path: String, status: String, summ
 		"status": status,
 		"summary": summary,
 	}
+	if not action_type.is_empty():
+		rec["action_type"] = action_type
 	events.push_front(rec)
 	if not node_status.has(scene_path) or typeof(node_status.get(scene_path)) != TYPE_DICTIONARY:
 		node_status[scene_path] = {}
@@ -123,18 +177,19 @@ func add_node_change(scene_path: String, node_path: String, status: String, summ
 
 
 func get_file_marker(path: String) -> String:
-	var st = file_status.get(path, null)
+	var key := normalize_to_res_path(path)
+	var st = file_status.get(key, null)
 	if typeof(st) != TYPE_DICTIONARY:
 		return ""
 	match str(st.get("status", "")):
 		"created":
-			return "🟢 "
+			return FILE_MARKER_CREATED
 		"modified":
-			return "🟡 "
+			return FILE_MARKER_MODIFIED
 		"deleted":
-			return "⚫ "
+			return FILE_MARKER_DELETED
 		"failed":
-			return "🔴 "
+			return FILE_MARKER_FAILED
 		_:
 			return ""
 
@@ -148,19 +203,40 @@ func get_node_marker(scene_path: String, node_path: String) -> String:
 		return ""
 	match str(st.get("status", "")):
 		"created":
-			return "🟢 "
+			return NODE_MARKER_CREATED
 		"modified":
-			return "🟡 "
+			return NODE_MARKER_MODIFIED
 		_:
 			return ""
+
+
+## Normalize path to res:// form so file_status lookups match Script.resource_path and FileSystem metadata.
+static func normalize_to_res_path(p: String) -> String:
+	var s := str(p).replace("\\", "/").strip_edges()
+	if s.is_empty():
+		return s
+	if s.begins_with("res://"):
+		return s
+	return "res://" + s
+
+
+## Strip any known file/node marker from a display string (for re-applying decorations).
+static func strip_markers(s: String) -> String:
+	var out := s
+	for m in _FILE_MARKERS:
+		out = out.trim_prefix(m)
+	for m in _NODE_MARKERS:
+		out = out.trim_prefix(m)
+	return out
 
 
 func _add_event_from_change(change: Dictionary, from_pending: bool) -> void:
 	var id := str(change.get("id", ""))
 	if id.is_empty():
 		id = _new_id()
-	var file_path := str(change.get("file_path", ""))
+	var file_path := normalize_to_res_path(str(change.get("file_path", "")))
 	var change_type := str(change.get("change_type", "modify"))
+	var action_type := str(change.get("action_type", ""))
 	var lint_ok := bool(change.get("lint_ok", true))
 	var summary := str(change.get("summary", ""))
 	if summary.is_empty():
@@ -177,6 +253,8 @@ func _add_event_from_change(change: Dictionary, from_pending: bool) -> void:
 		"from_pending": from_pending,
 		"lint_ok": lint_ok,
 	}
+	if not action_type.is_empty():
+		ev["action_type"] = action_type
 	events.push_front(ev)
 	var status := "modified"
 	if change_type == "create":
@@ -190,3 +268,26 @@ func _add_event_from_change(change: Dictionary, from_pending: bool) -> void:
 		"last_edit_id": id,
 		"updated_unix": _now_unix(),
 	}
+
+
+## Returns { file_path, old_content } if the event is a file edit that can be reverted; else {}.
+## Caller writes old_content to file_path, then call clear_file_status(path) so editor indicators update.
+func get_revert_info(edit_id: String) -> Dictionary:
+	for e in events:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		if str(e.get("id", "")) != edit_id:
+			continue
+		if str(e.get("kind", "")) != "file":
+			return {}
+		var old_content := str(e.get("old_content", ""))
+		var file_path := normalize_to_res_path(str(e.get("file_path", "")))
+		if file_path.is_empty():
+			return {}
+		return {"file_path": file_path, "old_content": old_content}
+	return {}
+
+
+func clear_file_status(file_path: String) -> void:
+	file_status.erase(normalize_to_res_path(file_path))
+	save_to_disk()

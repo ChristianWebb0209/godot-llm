@@ -1,5 +1,7 @@
 import asyncio
+import contextlib
 import json
+import logging
 import os
 import sys
 from typing import Any, Dict, List, Optional, Tuple
@@ -10,7 +12,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .rag_core import SourceChunk, _collect_code_results, _collect_top_docs
+from .rag_core import SourceChunk, _collect_code_results, _collect_top_docs, get_collections
+from .services.repo_indexing import get_repo_index_stats
 from .services.tools import (
     dispatch_tool_call,
     get_openai_tools_payload,
@@ -34,14 +37,59 @@ from .context_builder import (
     build_related_files_context,
     blocks_to_user_content,
     get_context_limit,
+    list_project_files,
     read_project_file,
     trim_text_to_tokens,
 )
+from .console_log import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
 
 
 load_dotenv()  # Load environment variables from .env if present.
 
-app = FastAPI(title="Godot RAG Service", version="0.1.0")
+# Only show WARNING and above for watchfiles/reload — avoid info spam when files change
+for _watch_log in ("watchfiles", "watchfiles.main", "uvicorn.reload"):
+    logging.getLogger(_watch_log).setLevel(logging.WARNING)
+
+
+def _asyncio_exception_handler(loop: asyncio.AbstractEventLoop, context: dict) -> None:
+    """Suppress noisy CancelledError tracebacks on Ctrl+C shutdown."""
+    exc = context.get("exception")
+    if isinstance(exc, asyncio.CancelledError):
+        return
+    loop.default_exception_handler(context)
+
+
+class _SuppressCancelledErrorFilter(logging.Filter):
+    """Filter out ERROR logs for asyncio.CancelledError (clean Ctrl+C shutdown)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno < logging.ERROR:
+            return True
+        if record.exc_info and record.exc_info[0] is not None:
+            if record.exc_info[0] is asyncio.CancelledError:
+                return False
+        if "CancelledError" in (record.getMessage() or ""):
+            return False
+        return True
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(_asyncio_exception_handler)
+    # Suppress ERROR-level tracebacks for CancelledError on shutdown (Ctrl+C)
+    for name in ("uvicorn", "uvicorn.error", "starlette.routing", ""):
+        log = logging.getLogger(name) if name else logging.root
+        log.addFilter(_SuppressCancelledErrorFilter())
+    try:
+        yield
+    except asyncio.CancelledError:
+        pass
+    finally:
+        pass
+
+
+app = FastAPI(title="Godot RAG Service", version="0.1.0", lifespan=lifespan)
 init_db()
 
 
@@ -78,29 +126,38 @@ def _log_usage_and_cost(
     total_tokens = prompt_tokens + completion_tokens
     cost = _estimate_cost_usd(model, prompt_tokens, completion_tokens)
     print(
-        "[usage] "
-        f"context={context} "
-        f"model={model} "
-        f"prompt_tokens={prompt_tokens} "
-        f"completion_tokens={completion_tokens} "
-        f"total_tokens={total_tokens} "
-        f"est_cost_usd={cost:.6f}"
+        _cyan("usage")
+        + " "
+        + _dim(f"model={model} in={prompt_tokens} out={completion_tokens} total={total_tokens} ${cost:.4f}")
     )
 
 
 def _log_llm_input(model: str, context: str, input_payload: Any) -> None:
-    """
-    Debug log: dump the full input payload we send to the LLM.
-    WARNING: This may be large. Do not include API keys here.
-    """
-    try:
-        dumped = json.dumps(input_payload, ensure_ascii=False, indent=2)
-    except Exception:
-        dumped = str(input_payload)
-    # Windows consoles can choke on box-drawing characters; normalize to a safe encoding.
-    enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-    safe = dumped.encode(enc, errors="backslashreplace").decode(enc, errors="ignore")
-    print(f"[llm_input] context={context} model={model}\n{safe}\n")
+    """Log a one-line summary of the LLM request. Set DEBUG_LLM_INPUT=1 to dump full payload."""
+    if os.getenv("DEBUG_LLM_INPUT"):
+        try:
+            dumped = json.dumps(input_payload, ensure_ascii=False, indent=2)
+        except Exception:
+            dumped = str(input_payload)
+        enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+        safe = dumped.encode(enc, errors="backslashreplace").decode(enc, errors="ignore")
+        print(f"{_yellow('llm_input')} context={context} model={model}\n{safe}\n")
+        return
+    n_msgs = len(input_payload) if isinstance(input_payload, list) else 0
+    total_chars = 0
+    if isinstance(input_payload, list):
+        for m in input_payload:
+            if isinstance(m, dict) and "content" in m:
+                c = m.get("content")
+                total_chars += len(str(c)) if c else 0
+    print(_dim(f"llm request model={model} context={context} messages={n_msgs} chars≈{total_chars}"))
+
+
+def _log_rag_request(method_label: str, client_host: str, question: str, color_fn: Any = _green) -> None:
+    q = (question.strip() or "")[:56]
+    if len(question.strip()) > 56:
+        q += "…"
+    print(color_fn(method_label) + " " + _dim(f"{client_host} ") + _dim(f"{q!r}"))
 
 
 def get_openai_client() -> Optional[OpenAI]:
@@ -150,7 +207,7 @@ class QueryContext(BaseModel):
 class QueryRequest(BaseModel):
     question: str
     context: Optional[QueryContext] = None
-    top_k: int = 5
+    top_k: int = 3
     # Optional overrides from plugin settings (take precedence over env).
     api_key: Optional[str] = None
     model: Optional[str] = None
@@ -358,21 +415,24 @@ def _run_query_with_tools(
         "- Retrieved example project code snippets (the 'project_code' collection, non-canonical examples).\n"
         "- Search tools: 'search_docs' and 'search_project_code' to refine your search.\n"
         "- Editor tools (executed in the user's Godot editor):\n"
-        "  - create_file, write_file: create or overwrite project files (e.g. res://scripts/foo.gd).\n"
-        "  - apply_patch: replace old_string with new_string in a file.\n"
+        "  - read_file(path): Call this to read the current contents of any project file (e.g. res://player.gd, res://scripts/foo.gd). "
+        "You WILL receive the full file content in the tool result—use it to answer 'what is in this file', to lint/fix code, or before editing. "
+        "Always call read_file when you need to see a file's contents; do not guess or assume.\n"
+        "  - list_directory(path, recursive, max_entries): list entries (files and dirs) in a folder.\n"
+        "  - list_files(path, recursive, extensions, max_entries): list only file paths, optionally filtered by extension (e.g. ['.svg'], ['.png','.jpg']). Use this to find 'all .svg files' or 'all scenes'.\n"
+        "  - search_files(query, root_path, extensions): grep—find files whose content contains the query text.\n"
+        "  - read_import_options(path): read the .import file for a resource (e.g. res://icon.svg) to see current import options (compression, mipmaps, etc.).\n"
+        "  - modify_attribute(target_type, attribute, value, ...): set an attribute on a target. target_type='node' (then scene_path, node_path) for scene node properties; target_type='import' (then path) for .import [params] keys (e.g. SVG compress=true). One tool for both.\n"
+        "  - create_file, write_file: create or overwrite project files. Pass the COMPLETE file content in the 'content' argument.\n"
+        "  - apply_patch(path, old_string, new_string): small targeted edits.\n"
         "  - create_script: create a GDScript or C# script with extends and optional content.\n"
-            "  - read_file: read a project file (res://...).\n"
-            "  - list_directory: list entries under a project directory (res://...).\n"
-            "  - search_files: search text inside project files under res://.\n"
-            "  - delete_file: delete a project file (proposed via pending changes).\n"
-        "  - create_node: add a node (any Godot type) to a scene under a parent path.\n"
-        "  - set_node_property: set a property on a node (position, text, visible, etc.).\n\n"
-        "Treat the docs collection as the authoritative source for engine behavior and APIs. "
-        "Use project_code snippets as patterns and inspiration; when there is any conflict, prefer the docs. "
-        "Use search tools when they will significantly improve your answer. "
-        "Use editor tools when the user asks you to create or edit files, add nodes, or change properties. "
-        "When the user explicitly asks to create a file (e.g. 'create test.gd' or 'create a file named X'), "
-        "you MUST call create_file or write_file with the path and content; do not only show code in your message. "
+        "  - delete_file(path): delete a project file.\n"
+        "  - create_node(scene_path, parent_path, node_type, node_name): add a node to a scene. node_type must be a built-in class (Node, Button, etc.).\n\n"
+        "Tool usage rules:\n"
+        "- To see what is in a file or to edit it correctly, call read_file(path) first; the tool result will contain the file content.\n"
+        "- Use search_docs / search_project_code when you need more documentation or code examples.\n"
+        "- When the user asks you to create or edit a file, call write_file or create_file with the FULL content—never empty or placeholder. "
+        "Then tell the user to review in the 'Pending & Timeline' tab and click Accept.\n"
         "When you are satisfied, return a final answer to the user."
     )
 
@@ -409,7 +469,7 @@ def _run_query_with_tools(
     # Recency working set (SQLite): include the most recent diffs as lightweight context.
     recent_edits_text: List[str] = []
     try:
-        recent = list_recent_file_changes(limit_edits=80, max_files=6)
+        recent = list_recent_file_changes(limit_edits=30, max_files=6)
         for r in recent:
             recent_edits_text.append(
                 f"Edit #{r['edit_id']} ({r['trigger']}): {r['summary']}\n"
@@ -462,12 +522,17 @@ def _run_query_with_tools(
         related_files=related_files,
         recent_edits=recent_edits_text,
         optional_extras=optional_extras,
+        include_system_in_user=False,
     )
-    user_content, _dbg = blocks_to_user_content(blocks)
+    limit = get_context_limit(model)
+    user_content, _dbg = blocks_to_user_content(blocks, limit=limit, reserve=4096)
     user_content += (
-        "\n\nYou may call search_docs/search_project_code for more context, or editor tools "
-        "(create_file, write_file, apply_patch, create_script, create_node, set_node_property) "
-        "when the user wants changes in the project. If the existing context is enough, answer directly.\n"
+        "\n\nYou may call read_file(path) to read any project file; list_files(path, recursive, extensions) to find all files of a type (e.g. all .svg); "
+        "read_import_options(path) to see import settings; modify_attribute(target_type='import', path=..., attribute=..., value=...) to change them (e.g. attribute=compress, value=true for lossless SVG). "
+        "Use modify_attribute(target_type='node', scene_path=..., node_path=..., attribute=..., value=...) for node properties. "
+        "Use search_docs/search_project_code for more context; editor tools (write_file, apply_patch, create_script, create_node) for other changes. "
+        "When creating or editing a file, call read_file first, then write_file or create_file with the full 'content' argument. "
+        "If the existing context is enough, answer directly.\n"
     )
 
     messages: List[Dict[str, Any]] = [
@@ -588,7 +653,52 @@ def _run_query_with_tools(
 
         if parsed_tool_calls:
             for name, call_id, args_dict, call_item in parsed_tool_calls:
-                tool_output = dispatch_tool_call(name, args_dict)
+                # When we have project_root_abs (plugin sent it), run read_file / list_files /
+                # read_import_options on the backend so the LLM receives the result. Otherwise
+                # return execute_on_client payload for the plugin to run.
+                if name == "read_file" and project_root_abs:
+                    path = (args_dict.get("path") or "").strip()
+                    if path:
+                        content = read_project_file(project_root_abs, path)
+                        tool_output = {
+                            "success": True,
+                            "path": path,
+                            "content": content or "",
+                            "message": "Read: %s (%d chars)" % (path, len(content or "")),
+                        }
+                    else:
+                        tool_output = dispatch_tool_call(name, args_dict)
+                elif name == "list_files" and project_root_abs:
+                    path = (args_dict.get("path") or "res://").strip() or "res://"
+                    recursive = bool(args_dict.get("recursive", True))
+                    extensions = args_dict.get("extensions") or []
+                    max_entries = min(2000, max(1, int(args_dict.get("max_entries", 500))))
+                    paths = list_project_files(
+                        project_root_abs, path, recursive=recursive,
+                        extensions=extensions, max_entries=max_entries,
+                    )
+                    tool_output = {
+                        "success": True,
+                        "message": "Listed %d file(s) under %s" % (len(paths), path),
+                        "path": path,
+                        "paths": paths,
+                    }
+                elif name == "read_import_options" and project_root_abs:
+                    path = (args_dict.get("path") or "").strip()
+                    if path:
+                        import_path = path if path.endswith(".import") else path + ".import"
+                        content = read_project_file(project_root_abs, import_path)
+                        tool_output = {
+                            "success": content is not None,
+                            "message": "Read import options for %s" % path if content is not None else "No .import file found for: %s" % path,
+                            "path": path,
+                            "import_path": import_path,
+                            "content": content or "",
+                        }
+                    else:
+                        tool_output = dispatch_tool_call(name, args_dict)
+                else:
+                    tool_output = dispatch_tool_call(name, args_dict)
                 tool_call_results.append(
                     ToolCallResult(tool_name=name, arguments=args_dict, output=tool_output)
                 )
@@ -688,6 +798,38 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+class IndexStatusResponse(BaseModel):
+    chroma_docs: int = 0
+    chroma_project_code: int = 0
+    repo_index_error: Optional[str] = None
+    repo_index_files: Optional[int] = None
+    repo_index_edges: Optional[int] = None
+
+
+@app.get("/index_status", response_model=IndexStatusResponse)
+async def index_status(project_root: Optional[str] = None) -> IndexStatusResponse:
+    """
+    Return indexing facts: Chroma collection counts and optional repo index stats.
+    If project_root is provided (query param), also return repo index file/edge counts.
+    """
+    docs_c, code_c = get_collections()
+    chroma_docs = int(docs_c.count()) if docs_c is not None else 0
+    chroma_project_code = int(code_c.count()) if code_c is not None else 0
+    out = IndexStatusResponse(
+        chroma_docs=chroma_docs,
+        chroma_project_code=chroma_project_code,
+    )
+    if project_root and project_root.strip():
+        root = project_root.strip()
+        stats = get_repo_index_stats(root)
+        if "error" in stats:
+            out.repo_index_error = str(stats["error"])
+        else:
+            out.repo_index_files = stats.get("files", 0)
+            out.repo_index_edges = stats.get("edges", 0)
+    return out
+
+
 class FileChangeIn(BaseModel):
     file_path: str
     change_type: str = "modify"
@@ -701,6 +843,10 @@ class EditEventIn(BaseModel):
     summary: str
     prompt: Optional[str] = None
     changes: List[FileChangeIn]
+    semantic_summary: Optional[str] = None
+    lint_errors_before: Optional[str] = None
+    lint_errors_after: Optional[str] = None
+    retrieved_chunk_ids: Optional[List[str]] = None
 
 
 class UndoResponse(BaseModel):
@@ -769,6 +915,59 @@ async def lint_memory_search(engine_version: str, raw_lint_output: str, limit: i
     return {"ok": True, "results": results}
 
 
+class LintRequest(BaseModel):
+    """Request to run Godot script linter on a file. Run from backend to avoid spawning Godot from inside the editor (which can crash)."""
+    project_root_abs: str
+    path: str  # res://path or path relative to project
+
+
+def _get_godot_bin() -> str:
+    """Godot executable for headless lint. Prefer GODOT_BIN env; else 'godot' (or godot.exe on Windows)."""
+    bin_path = os.getenv("GODOT_BIN", "").strip()
+    if bin_path:
+        return bin_path
+    if sys.platform == "win32":
+        return "godot.exe"
+    return "godot"
+
+
+@app.post("/lint")
+async def run_lint(payload: LintRequest) -> Dict[str, Any]:
+    """
+    Run Godot headless linter (--check-only) on a script file.
+    Called by the plugin so the editor never spawns a second Godot process (which can crash the running editor).
+    """
+    project_root = (payload.project_root_abs or "").strip().rstrip("/\\")
+    path = (payload.path or "").strip().replace("\\", "/")
+    if path.startswith("res://"):
+        path = path[6:].lstrip("/")
+    if not project_root or not path:
+        return {"success": False, "output": "project_root_abs and path are required", "exit_code": -1}
+    if not os.path.isdir(project_root):
+        return {"success": False, "output": f"Project root not found: {project_root}", "exit_code": -1}
+    godot_bin = _get_godot_bin()
+    args = [godot_bin, "--headless", "--editor", "--path", project_root, "--check-only", path]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=project_root,
+        )
+        stdout_bytes, stderr_bytes = await proc.communicate()
+        out = (stdout_bytes or b"").decode("utf-8", errors="replace") + (stderr_bytes or b"").decode("utf-8", errors="replace")
+        out = out.strip()
+        return {"success": proc.returncode == 0, "output": out, "exit_code": proc.returncode or 0}
+    except FileNotFoundError:
+        return {
+            "success": False,
+            "output": f"Godot not found: {godot_bin}. Set GODOT_BIN to the full path to the Godot editor executable.",
+            "exit_code": -1,
+        }
+    except Exception as e:
+        return {"success": False, "output": str(e), "exit_code": -1}
+
+
 @app.post("/edit_events/create")
 async def edit_events_create(payload: EditEventIn) -> Dict[str, Any]:
     edit_id = create_edit_event(
@@ -777,13 +976,25 @@ async def edit_events_create(payload: EditEventIn) -> Dict[str, Any]:
         summary=payload.summary,
         prompt=payload.prompt,
         changes=[c.model_dump() for c in payload.changes],
+        semantic_summary=payload.semantic_summary,
+        lint_errors_before=payload.lint_errors_before,
+        lint_errors_after=payload.lint_errors_after,
+        retrieved_chunk_ids=payload.retrieved_chunk_ids,
     )
     return {"ok": True, "edit_id": edit_id}
 
 
 @app.get("/edit_events/list")
-async def edit_events_list(limit: int = 100) -> Dict[str, Any]:
+async def edit_events_list(limit: int = 500) -> Dict[str, Any]:
     return {"ok": True, "events": list_edit_events(limit=int(limit))}
+
+
+@app.get("/edit_events/{edit_id}")
+async def edit_events_get(edit_id: int) -> Dict[str, Any]:
+    e = get_edit_event(int(edit_id))
+    if not e:
+        return {"ok": False, "error": "not_found"}
+    return {"ok": True, "event": e}
 
 
 @app.post("/edit_events/undo/{edit_id}", response_model=UndoResponse)
@@ -821,7 +1032,7 @@ async def query_rag(payload: QueryRequest, request: Request) -> QueryResponseWit
       (i.e. we don't find enough high-tier hits).
     """
     client_host = request.client.host if request.client else "unknown"
-    print(f"[RAG] /query from {client_host}: {payload.question!r}")
+    _log_rag_request("POST /query", client_host, payload.question or "", _cyan)
 
     question = payload.question.strip()
     context_language = payload.context.language if payload.context else None
@@ -857,7 +1068,7 @@ async def query_stream_with_tools(payload: QueryRequest, request: Request):
     are enabled so the user sees progressive output and still gets tool execution.
     """
     client_host = request.client.host if request.client else "unknown"
-    print(f"[RAG] /query_stream_with_tools from {client_host}: {payload.question!r}")
+    _log_rag_request("POST /query_stream_with_tools", client_host, payload.question or "", _green)
 
     question = payload.question.strip()
     context_language = payload.context.language if payload.context else None
@@ -902,7 +1113,7 @@ async def query_stream(payload: QueryRequest, request: Request):
     - If no OpenAI client is configured, streams a single fallback answer.
     """
     client_host = request.client.host if request.client else "unknown"
-    print(f"[RAG] /query_stream from {client_host}: {payload.question!r}")
+    _log_rag_request("POST /query_stream", client_host, payload.question or "", _dim)
 
     question = payload.question.strip()
     context_language = payload.context.language if payload.context else None
@@ -1031,5 +1242,14 @@ async def query_stream(payload: QueryRequest, request: Request):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    try:
+        uvicorn.run(
+            "app.main:app",
+            host="0.0.0.0",
+            port=8000,
+            reload=True,
+            log_level="warning",
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        sys.exit(0)
 

@@ -16,7 +16,7 @@ const KEY_SELECTED_MODEL := "selected_model"
 const KEY_FOLLOW_AGENT := "follow_agent"
 const KEY_ALLOW_EDITOR_ACTIONS := "allow_editor_actions"
 
-const DEFAULT_TEXT_SIZE := 16
+const DEFAULT_TEXT_SIZE := 18
 const DEFAULT_RAG_URL := "http://127.0.0.1:8000"
 const DEFAULT_PROVIDER := "openai"
 const DEFAULT_MODEL := "gpt-4.1-mini"

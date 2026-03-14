@@ -464,6 +464,34 @@ def _to_res_from_rel(rel: str) -> str:
     return f"res://{rel}"
 
 
+def get_repo_index_stats(project_root_abs: str) -> Dict[str, Any]:
+    """
+    Return file and edge counts for the repo index, if it exists.
+    Does not run indexing. Returns {"files": N, "edges": N} or {"error": "..."}.
+    """
+    try:
+        rid = _default_repo_id(str(Path(project_root_abs).expanduser().resolve()))
+        db_path = _db_path_for_repo_id(rid)
+        if not os.path.isfile(db_path):
+            return {"error": "not_indexed"}
+        conn = _get_conn(db_path)
+        try:
+            files_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM files WHERE repo_id = ?", (rid,)
+            ).fetchone()
+            edges_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM edges WHERE repo_id = ?", (rid,)
+            ).fetchone()
+            return {
+                "files": int(files_row["n"]) if files_row else 0,
+                "edges": int(edges_row["n"]) if edges_row else 0,
+            }
+        finally:
+            conn.close()
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_related_res_paths(
     *,
     project_root_abs: str,

@@ -1,5 +1,6 @@
 import difflib
 import hashlib
+import json
 import os
 import sqlite3
 import time
@@ -55,8 +56,31 @@ def init_db() -> None:
             """
         )
         conn.commit()
+        _migrate_edit_events_columns(conn)
     finally:
         conn.close()
+
+
+def _migrate_edit_events_columns(conn: sqlite3.Connection) -> None:
+    """Add EDIT_HISTORY ai_context columns if missing (prompt, semantic_summary, lint_*)."""
+    new_columns = [
+        ("prompt", "TEXT"),
+        ("semantic_summary", "TEXT"),
+        ("lint_errors_before", "TEXT"),
+        ("lint_errors_after", "TEXT"),
+        ("retrieved_chunk_ids", "TEXT"),  # JSON array of chunk ids
+    ]
+    for col_name, col_type in new_columns:
+        try:
+            conn.execute(
+                "ALTER TABLE edit_events ADD COLUMN %s %s" % (col_name, col_type)
+            )
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" in str(e).lower():
+                pass
+            else:
+                raise
+    conn.commit()
 
 
 def _sha256_text(s: Optional[str]) -> Optional[str]:
@@ -95,8 +119,12 @@ def create_edit_event(
     actor: str,
     trigger: str,
     summary: str,
-    prompt: Optional[str],
+    prompt: Optional[str] = None,
     changes: List[Dict[str, Any]],
+    semantic_summary: Optional[str] = None,
+    lint_errors_before: Optional[str] = None,
+    lint_errors_after: Optional[str] = None,
+    retrieved_chunk_ids: Optional[List[str]] = None,
 ) -> int:
     """
     Create an edit event + its file changes.
@@ -107,12 +135,21 @@ def create_edit_event(
     """
     ts = time.time()
     prompt_hash = _sha256_text(prompt) if prompt else None
+    chunk_ids_json: Optional[str] = None
+    if retrieved_chunk_ids is not None:
+        chunk_ids_json = json.dumps(retrieved_chunk_ids)
 
     conn = get_conn()
     try:
         cur = conn.execute(
-            "INSERT INTO edit_events(timestamp, actor, trigger, prompt_hash, summary) VALUES (?,?,?,?,?)",
-            (ts, actor, trigger, prompt_hash, summary),
+            """INSERT INTO edit_events(
+                timestamp, actor, trigger, prompt_hash, summary,
+                prompt, semantic_summary, lint_errors_before, lint_errors_after, retrieved_chunk_ids
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                ts, actor, trigger, prompt_hash, summary,
+                prompt, semantic_summary, lint_errors_before, lint_errors_after, chunk_ids_json,
+            ),
         )
         edit_id = int(cur.lastrowid)
 
@@ -155,7 +192,9 @@ def list_edit_events(limit: int = 100) -> List[Dict[str, Any]]:
     conn = get_conn()
     try:
         events = conn.execute(
-            "SELECT id, timestamp, actor, trigger, prompt_hash, summary FROM edit_events ORDER BY timestamp DESC LIMIT ?",
+            """SELECT id, timestamp, actor, trigger, prompt_hash, summary,
+                      prompt, semantic_summary, lint_errors_before, lint_errors_after, retrieved_chunk_ids
+               FROM edit_events ORDER BY timestamp DESC LIMIT ?""",
             (int(limit),),
         ).fetchall()
 
@@ -170,6 +209,13 @@ def list_edit_events(limit: int = 100) -> List[Dict[str, Any]]:
                 """,
                 (int(e["id"]),),
             ).fetchall()
+            chunk_ids = None
+            try:
+                rci = e["retrieved_chunk_ids"]
+                if rci:
+                    chunk_ids = json.loads(rci)
+            except (TypeError, ValueError, KeyError):
+                pass
             out.append(
                 {
                     "id": int(e["id"]),
@@ -178,6 +224,11 @@ def list_edit_events(limit: int = 100) -> List[Dict[str, Any]]:
                     "trigger": e["trigger"],
                     "prompt_hash": e["prompt_hash"],
                     "summary": e["summary"],
+                    "prompt": e["prompt"] if "prompt" in e.keys() else None,
+                    "semantic_summary": e["semantic_summary"] if "semantic_summary" in e.keys() else None,
+                    "lint_errors_before": e["lint_errors_before"] if "lint_errors_before" in e.keys() else None,
+                    "lint_errors_after": e["lint_errors_after"] if "lint_errors_after" in e.keys() else None,
+                    "retrieved_chunk_ids": chunk_ids,
                     "changes": [
                         {
                             "id": int(c["id"]),
@@ -200,11 +251,20 @@ def get_edit_event(edit_id: int) -> Optional[Dict[str, Any]]:
     conn = get_conn()
     try:
         e = conn.execute(
-            "SELECT id, timestamp, actor, trigger, prompt_hash, summary FROM edit_events WHERE id = ?",
+            """SELECT id, timestamp, actor, trigger, prompt_hash, summary,
+                      prompt, semantic_summary, lint_errors_before, lint_errors_after, retrieved_chunk_ids
+               FROM edit_events WHERE id = ?""",
             (int(edit_id),),
         ).fetchone()
         if not e:
             return None
+        chunk_ids = None
+        try:
+            rci = e["retrieved_chunk_ids"]
+            if rci:
+                chunk_ids = json.loads(rci)
+        except (TypeError, ValueError, KeyError):
+            pass
         changes = conn.execute(
             """
             SELECT id, file_path, change_type, diff, lines_added, lines_removed, old_content, new_content
@@ -221,6 +281,11 @@ def get_edit_event(edit_id: int) -> Optional[Dict[str, Any]]:
             "trigger": e["trigger"],
             "prompt_hash": e["prompt_hash"],
             "summary": e["summary"],
+            "prompt": e["prompt"] if "prompt" in e.keys() else None,
+            "semantic_summary": e["semantic_summary"] if "semantic_summary" in e.keys() else None,
+            "lint_errors_before": e["lint_errors_before"] if "lint_errors_before" in e.keys() else None,
+            "lint_errors_after": e["lint_errors_after"] if "lint_errors_after" in e.keys() else None,
+            "retrieved_chunk_ids": chunk_ids,
             "changes": [
                 {
                     "id": int(c["id"]),

@@ -179,33 +179,37 @@ def build_ordered_blocks(
     related_files: List[Tuple[str, str]],
     recent_edits: List[str],
     optional_extras: List[str],
+    include_system_in_user: bool = False,
 ) -> List[ContextBlock]:
     """
     Stage-2 context builder with explicit ordering + per-block budgets.
-    Order: system instructions → current task → active file → errors → retrieved knowledge → optional extras.
+    Order: current task → active file → related → recent edits → errors → retrieved knowledge → optional extras.
+    When include_system_in_user is False (default), system instructions are NOT added as a block
+    (caller sends them as a separate system message to avoid duplication).
     """
     limit = get_context_limit(model)
 
-    # Budget slices (conservative). Total stays under limit.
-    sys_budget = min(1200, max(400, int(limit * 0.04)))
+    # Budget slices; sum of max_tokens stays <= limit - reserve (see blocks_to_user_content).
     task_budget = min(1200, max(300, int(limit * 0.03)))
-    file_budget = min(9000, max(1200, int(limit * 0.28)))
-    related_budget = min(8000, max(800, int(limit * 0.18)))
-    recent_budget = min(4500, max(600, int(limit * 0.12)))
-    err_budget = min(4000, max(600, int(limit * 0.10)))
-    know_budget = min(10000, max(1200, int(limit * 0.30)))
-    extra_budget = min(3000, max(400, int(limit * 0.08)))
+    file_budget = min(4500, max(1200, int(limit * 0.15)))
+    related_budget = min(3200, max(800, int(limit * 0.10)))
+    recent_budget = min(2000, max(400, int(limit * 0.06)))
+    err_budget = min(3200, max(600, int(limit * 0.10)))
+    know_budget = min(6000, max(1200, int(limit * 0.18)))
+    extra_budget = min(2400, max(400, int(limit * 0.08)))
 
     blocks: List[ContextBlock] = []
-    blocks.append(
-        ContextBlock(
-            key="system",
-            title="System instructions",
-            priority=0,
-            max_tokens=sys_budget,
-            text=system_instructions.strip(),
+    if include_system_in_user:
+        sys_budget = min(1200, max(400, int(limit * 0.04)))
+        blocks.append(
+            ContextBlock(
+                key="system",
+                title="System instructions",
+                priority=0,
+                max_tokens=sys_budget,
+                text=system_instructions.strip(),
+            )
         )
-    )
     blocks.append(
         ContextBlock(
             key="task",
@@ -301,13 +305,22 @@ def build_ordered_blocks(
     return blocks
 
 
-def blocks_to_user_content(blocks: List[ContextBlock]) -> Tuple[str, Dict[str, Any]]:
+def blocks_to_user_content(
+    blocks: List[ContextBlock],
+    limit: Optional[int] = None,
+    reserve: int = 4096,
+) -> Tuple[str, Dict[str, Any]]:
     """
-    Trim each block to its budget; drop lowest-priority blocks if needed.
+    Trim each block to its budget; drop lowest-priority blocks until total <= target_cap.
+    target_cap = limit - reserve (for tools + completion). If limit is None, only per-block
+    trimming is applied and the previous behavior (cap at sum of max_tokens) is used.
     Returns (user_content, debug_info).
     """
     rendered: List[str] = []
     debug: Dict[str, Any] = {"blocks": []}
+    target_cap: Optional[int] = None
+    if limit is not None and limit > reserve:
+        target_cap = limit - reserve
 
     for b in blocks:
         fitted, mode = fit_block_text(b.text, b.max_tokens)
@@ -324,14 +337,13 @@ def blocks_to_user_content(blocks: List[ContextBlock]) -> Tuple[str, Dict[str, A
         if fitted:
             rendered.append(f"\n## {b.title}\n{fitted}\n")
 
-    # If still over budget, drop from the end (least valuable first).
     combined = "\n".join(rendered).strip()
     total_est = estimate_tokens(combined)
     debug["estimated_total_tokens"] = total_est
 
-    # Hard cap: drop blocks from end until under limit.
-    # (We assume blocks already individually trimmed, so this is rare.)
-    while len(rendered) > 1 and total_est > sum(b.max_tokens for b in blocks):
+    # Hard cap: drop blocks from end until under target_cap (or under sum of max_tokens if no limit).
+    cap = target_cap if target_cap is not None else sum(b.max_tokens for b in blocks)
+    while len(rendered) > 1 and total_est > cap:
         rendered.pop()
         combined = "\n".join(rendered).strip()
         total_est = estimate_tokens(combined)
@@ -358,6 +370,65 @@ def read_project_file(project_root_abs: str, res_path: str, max_bytes: int = 200
         return data.decode("utf-8", errors="replace")
     except Exception:
         return None
+
+
+def list_project_files(
+    project_root_abs: str,
+    res_path: str = "res://",
+    recursive: bool = True,
+    extensions: Optional[List[str]] = None,
+    max_entries: int = 500,
+) -> List[str]:
+    """
+    List file paths under project_root_abs under res_path (res:// or res://subdir).
+    Returns res://-prefixed paths. Skips .godot. extensions e.g. ['.svg'] (with or without leading dot).
+    """
+    if not project_root_abs or not os.path.isdir(project_root_abs):
+        return []
+    rp = res_path.replace("\\", "/").strip()
+    if rp.startswith("res://"):
+        rp = rp[len("res://") :].lstrip("/")
+    root = os.path.abspath(os.path.join(project_root_abs, rp))
+    if not root.startswith(os.path.abspath(project_root_abs)):
+        return []
+    exts = set()
+    if extensions:
+        for e in extensions:
+            e = (e or "").strip().lower()
+            if e and not e.startswith("."):
+                e = "." + e
+            if e:
+                exts.add(e)
+    out: List[str] = []
+
+    def walk(dir_abs: str, dir_res: str) -> None:
+        if len(out) >= max_entries:
+            return
+        try:
+            entries = os.listdir(dir_abs)
+        except OSError:
+            return
+        for name in sorted(entries):
+            if len(out) >= max_entries:
+                return
+            if name.startswith(".") and name == ".godot":
+                continue
+            child_abs = os.path.join(dir_abs, name)
+            child_res = (dir_res + "/" + name) if dir_res else name
+            if os.path.isdir(child_abs):
+                if recursive:
+                    walk(child_abs, child_res)
+                continue
+            if exts:
+                ext = "." + (os.path.splitext(name)[1] or "").lower()
+                if ext not in exts:
+                    continue
+            out.append("res://" + child_res.replace("\\", "/"))
+
+    start_res = rp.replace("\\", "/") if rp else ""
+    if os.path.isdir(root):
+        walk(root, start_res)
+    return out
 
 
 _RE_RES_PATH = re.compile(r'res://[^"\'\s\)]+')

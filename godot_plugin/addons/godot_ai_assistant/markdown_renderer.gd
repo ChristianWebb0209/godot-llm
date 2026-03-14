@@ -2,6 +2,8 @@ extends Resource
 
 class_name GodotAIMarkdownRenderer
 
+const _LOG_PREFIX := "[AI Assistant] "
+
 
 func _split_lines_preserve_newlines(text: String) -> Array:
 	var lines: Array = []
@@ -17,6 +19,7 @@ func _split_lines_preserve_newlines(text: String) -> Array:
 
 
 func markdown_to_bbcode(md: String) -> String:
+	print(_LOG_PREFIX + "lint/md: markdown_to_bbcode START md.length=%d" % md.length())
 	var lines: Array = _split_lines_preserve_newlines(md)
 	var out_lines: Array = []
 	var in_code_block := false
@@ -35,7 +38,8 @@ func markdown_to_bbcode(md: String) -> String:
 			continue
 
 		if in_code_block:
-			out_lines.append(line)
+			# Escape [ ] so lint/output don't break BBCode (RichTextLabel parses them as tags)
+			out_lines.append(line.replace("[", "[lb]").replace("]", "[rb]"))
 			continue
 
 		# Headings
@@ -80,7 +84,9 @@ func markdown_to_bbcode(md: String) -> String:
 
 		out_lines.append(processed)
 
-	return "\n".join(out_lines)
+	var result_bb := "\n".join(out_lines)
+	print(_LOG_PREFIX + "lint/md: markdown_to_bbcode DONE result.length=%d" % result_bb.length())
+	return result_bb
 
 
 func _replace_delimited(text: String, marker: String, open_tag: String, close_tag: String) -> String:
@@ -99,4 +105,3 @@ func _replace_delimited(text: String, marker: String, open_tag: String, close_ta
 			result += text[i]
 			i += 1
 	return result
-

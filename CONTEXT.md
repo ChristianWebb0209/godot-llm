@@ -1,6 +1,34 @@
 ## Project Context for Future LLMs
 
-This file is the **single source of truth** for how the **Godot LLM Assistant** works: architecture, tools, conventions, and important paths. Future LLMs should read this before making changes.
+This file is the **single source of truth** for how the **Godot LLM Assistant** works: architecture, tools, conventions, and important paths. **Read this before making changes.**
+
+---
+
+## Quick reference for future agents
+
+- **Change a tool (add/rename/parameters)**  
+  `rag_service/app/services/tools.py`: edit `ToolDef` in `get_registered_tools()` and the handler; update `main.py` system prompt if the LLM must use it differently. Plugin: `godot_plugin/addons/godot_ai_assistant/editor_tool_executor.gd` for execute_on_client actions.
+
+- **Change what the LLM sees (context / tools)**  
+  `rag_service/app/main.py`: `_run_query_with_tools` (system prompt, user blocks, tool payload). `rag_service/app/context_builder.py`: block order and budgets.
+
+- **Change plugin UI (tabs, chat, diff, history)**  
+  `godot_plugin/addons/godot_ai_assistant/ai_dock.gd` (logic) and `ai_dock.tscn` (scene). Tab selection uses **child node name** (e.g. `History`, `Settings`), not tab index.
+
+- **Edit History data**  
+  Backend: `rag_service/app/db.py` (edit_events, file_changes); DB file `rag_service/ai_history.db`. Plugin: Edit History tab uses `GET /edit_events/list?limit=500` and `GET /edit_events/{id}`.
+
+- **Plugin not loading**  
+  If the dock does not appear: check Godot Output for parse/script errors. Common causes: wrong node path in @onready (use `get_node_or_null()` in `_ready()` for optional nodes), or GDScript/Godot 4 API misuse (see §12). Open the project from the folder that contains `project.godot` (e.g. `godot_plugin`), not the parent repo root.
+
+- **read_file / lint_file**  
+  When the plugin sends `context.extra.project_root_abs`, the backend runs `read_file` on the server and returns file content to the LLM. `lint_file` is editor-only: plugin runs `--check-only` and shows output in chat; the LLM does not get that output in the same turn.
+
+- **Run backend**  
+  From `rag_service/`: `.\run_backend.ps1` (or `uvicorn app.main:app --reload`). Default URL `http://127.0.0.1:8000`; plugin uses Settings or `rag_service_url`.
+
+- **Quick test**  
+  Backend: `GET http://127.0.0.1:8000/health` → `{ "status": "ok" }`. Plugin: enable Tools, ask something that triggers read_file or a file edit; check Pending & Timeline and Edit History. Lint: ask to create/edit a script and confirm lint runs (headless `--check-only`) and output appears in chat.
 
 ---
 
@@ -14,12 +42,8 @@ This file is the **single source of truth** for how the **Godot LLM Assistant** 
     - C# (`.cs`)
     - Godot shaders (`.gdshader`)
 - Current focus:
-  - A robust **RAG pipeline**:
-    - Scrape + index official Godot docs.
-    - Ingest many GB of Godot projects (including large C#/shader-heavy games).
-    - Score and tag scripts by **importance** and **tags**.
-    - Retrieve a small set of **high-signal examples** per query.
-  - Editor plugin is a **question/answer dock** only (no automatic edits yet).
+  - **RAG pipeline** (docs + project_code), **context builder** (budgeted blocks, hard cap at model limit), **editor tools** (file + scene/node edits in Godot), **lint-after-edit** (headless lint + auto-fix up to 5 rounds), and **activity log** in chat (Thinking…, Using tool X, Linting…, Fixing lint…).
+  - Editor plugin: streaming answers, apply-immediately flow with timeline and Revert, visual indicators (🟢🟡🔴) in file/scene tree.
 
 ---
 
@@ -48,6 +72,13 @@ Important subpaths:
   - `rag_service/tools/testing/run_e2e_rag_tests.sh` – end-to-end RAG tests.
   - `rag_service/tools/testing/chroma-status.sh` – CLI status for Chroma.
   - `rag_service/tools/testing/chroma_visualize.py` – web UI for Chroma.
+- Repo indexing (structural graph):
+  - `rag_service/app/services/repo_indexing.py` – SQLite-backed file/edge index per project.
+  - `rag_service/app/repo_index_<repo_id>.db` – per-project DB (avoids lock contention).
+  - `rag_service/scripts/repo-indexer/index_repo.py` – CLI to index a Godot project root.
+- Repair memory (lint fixes):
+  - `rag_service/app/repair_memory.py` – SQLite store of lint failure → fix (diff + explanation).
+  - `rag_service/app/repair_memory.db` – single DB for all projects.
 
 ---
 
@@ -68,7 +99,7 @@ Important subpaths:
       - `selected_node_type: Optional[str]`.
       - `current_script: Optional[str]`.
       - `extra: Dict[str, Any]`.
-    - `top_k: int = 5`.
+    - `top_k: int = 3` (default; fewer RAG chunks to keep context lean).
   - Response model:
     - `answer: str` – markdown answer text.
     - `snippets: List[SourceChunk]`:
@@ -186,9 +217,13 @@ Important subpaths:
   - Call the model with both the RAG context and the tool manifest.
   - Detect tool calls, execute them via `dispatch_tool_call`, and feed results
     back into the model for up to a small, fixed number of rounds.
-- Today these tools operate only on collections (searching docs/code). Future
-  work will add tools that plan **editor actions** (text patches, file
-  creation, node renames) for the Godot plugin to execute.
+- Backend also defines **editor-action tools** whose handlers return `execute_on_client: true`; the Godot plugin runs those locally (create_file, write_file, apply_patch, create_script, create_node, delete_file, list_directory, list_files, search_files, read_import_options, modify_attribute, lint_file).
+- **read_file**: When the plugin sends `context.extra.project_root_abs`, the backend runs it on the server via `read_project_file()` and returns `{ success, path, content, message }` in the tool result so the LLM sees the file content. Essential for “what’s in this file” or editing with correct context. Otherwise returns execute_on_client (plugin runs it; result not fed back to LLM).
+- **list_files**, **read_import_options**: When `project_root_abs` is present, backend can run on server and return result to LLM; otherwise execute_on_client.
+- **list_files**: List file paths under res:// by optional extension (e.g. all .svg) without searching file contents. Use for “find all SVGs” then e.g. modify_attribute(import) on each.
+- **modify_attribute**: Single tool to set an attribute on a target. `target_type='node'` (scene_path, node_path, attribute, value) for node properties; `target_type='import'` (path, attribute, value) for .import [params] keys (e.g. SVG compress, texture mipmaps). Avoids adding a new tool per target kind.
+- **read_import_options**: Read the .import file for a resource to see current [params]. Use before modify_attribute(import) to see keys.
+- **lint_file**: Editor tool only. The plugin runs Godot headless `--check-only` on the given path and shows the lint output in the chat. The LLM does not receive the lint output in the same conversation turn.
 
 ---
 
@@ -358,59 +393,65 @@ In **all** modes:
 
 ---
 
-## 7. Godot Plugin Dock & Copy UX
+## 7. Godot Plugin Dock & UX
 
-- Plugin dock:
-  - Question label + a `VSplitContainer`:
-    - Top: `TextEdit` for question.
-    - Bottom: `RichTextLabel` for answer/snippets.
-  - Control row:
-    - `Ask` button (icon-only; disabled + shows loading icon while streaming).
-    - `Copy` button → copies parsed answer text to clipboard.
-    - **Tools** checkbox: when checked, the dock uses `POST /query_stream_with_tools` so it can stream output *and* receive tool calls; tool calls with `execute_on_client: true` are run locally by `GodotAIEditorToolExecutor` (see §7.1).
-    - Status label: short messages (`Ready`, `Sending...`, `Response received.`, `Nothing to copy.`, etc.).
-  - Context usage indicator:
-    - A compact label near the chat tabs shows estimated context usage (e.g. `Ctx: 2% (792/32768)`).
-  - History tab:
-    - Separate **History** tab (between Chat and Settings) shows SQLite-backed edit history + diffs and supports undo (see §7.2).
-- Users can **resize** input vs output via the splitter.
-- Copying output:
-  - Uses `get_parsed_text()` to get plain text.
-  - Uses `DisplayServer.clipboard_set(...)` to copy.
+- **Chat**:
+  - **Enter** sends the message; **Shift+Enter** inserts a newline (gui_input on prompt TextEdit).
+  - User message appears instantly; prompt is cleared and the request runs. Response streams in with a typing cursor; the message does not disappear while streaming.
+  - **You** vs **Assistant** are visually distinct (blue-tinted right-aligned block for user, green-tinted block for assistant with labels).
+  - Default font size is **18** (configurable in Settings). Copy uses `get_parsed_text()` and `DisplayServer.clipboard_set(...)`.
+  - **Tools** checkbox: when checked, the dock uses `POST /query_stream_with_tools`; tool calls with `execute_on_client: true` are run by `GodotAIEditorToolExecutor`. Context usage label near chat tabs (e.g. `Ctx: 2% (792/32768)`).
+- **Tabs**:
+  - **Main tabs** (Chat, Edit History, Settings, Pending & Timeline): `TabContainer.get_tab_bar().drag_to_rearrange_enabled = true`. Tab-change logic uses the **selected child’s node name** (e.g. `Settings`, `History`), not fixed indices, so it still works after the user reorders tabs.
+  - **Chat tabs** (Chat 1, Chat 2, …): `TabBar.drag_to_rearrange_enabled = true`; `active_tab_rearranged` is connected so `_chats` is reordered to match the new tab order.
+- **Pending & Timeline**: Diff preview (OldText/NewText) shows when a file item is selected; safe node resolution and minimum size so the panel stays visible.
+- **Edit History**: Flat ItemList + detail panel (timestamp, summary, files changed, prompt, lint). Data from `GET /edit_events/list?limit=500`; `GET /edit_events/{id}` returns full event with old/new content per file.
+- **Plugin load**: If the dock scene fails to load, a fallback panel with an error message is shown; check Output for errors.
 - The plugin passes `EditorInterface` into the dock via `set_editor_interface()` so the executor can open scenes, add nodes, and save.
 
-### 7.1 Editor tools (client-side execution)
+### 7.1 Editor tools: apply immediately + timeline + Revert
 
-- Backend defines these tools in `services/tools.py`; handlers return `{ "execute_on_client": true, "action": "<name>", ... }` so the plugin knows to run them.
-- **File / script tools** (executed in `editor_tool_executor.gd` via `FileAccess` and paths under `res://`):
-  - **create_file**: `path`, `content`, optional `overwrite`.
-  - **write_file**: `path`, `content` (overwrite entire file).
-  - **apply_patch**: `path`, `old_string`, `new_string` (first occurrence replaced).
-  - **create_script**: `path`, `language` (gdscript|csharp), optional `extends_class`, `initial_content`.
-- **Scene / node tools** (require `EditorInterface`: open scene, get root, add child, save):
-  - **create_node**: `scene_path`, `parent_path`, `node_type`, optional `node_name`. Adds a node of any Godot type to the given scene.
-  - **set_node_property**: `scene_path`, `node_path`, `property_name`, `value` (JSON: number, string, bool, or array for Vector2/Vector3).
-- Node tools run asynchronously (open scene → wait frame → get root → modify → save); the dock uses `execute_async()` and awaits each before updating status.
+- **Apply immediately**: File and node edits from tool calls are **executed right away** (no “pending” accept step). Each file edit is recorded in the local edit store, lint runs per file after apply, and the dock shows status per change.
+- **Tool-call contract**: Backend sends `{ "tool_name", "arguments", "output" }`. The dock uses `output` when it has `execute_on_client: true`; otherwise it builds the payload from `tool_name` + `arguments`.
+- **File tools** (`editor_tool_executor.gd`): create_file, write_file, apply_patch, create_script, delete_file, read_file, list_directory, search_files, list_files, lint_file (paths under `res://`). **Node/import**: create_node (async), modify_attribute (node or .import [params]). **lint_file**: plugin runs Godot headless `--check-only` and appends lint output to the chat.
+- **Local edit store** (`ai_edit_store.gd`): Persisted to `user://godot_ai_assistant_edits.json`. Holds `file_status` (path → status for indicators), `node_status` (scene → node → status), and `events` (timeline, newest first). Used for **editor indicators** and **Revert**.
+- **Indicators**: File tree and script tabs show 🟢 created, 🟡 modified, ⚫ deleted, 🔴 failed (lint), by matching paths from `file_status`. Scene tree shows 🧩 created (component) and 🟡 modified for nodes in `node_status` for the open scene. See §7.5 for how decorations are applied and styling constants.
+- **Timeline & Revert**: “Pending & Timeline” tab lists all applied changes (file + node) with action-type icons. Selecting a **file** event shows old vs new in the diff panel. **Revert selected** writes `old_content` back to the file and clears that path from `file_status` so the indicator goes away.
 
-### 7.2 Edit history (SQLite) + Undo
+### 7.2 Edit history: backend SQLite + plugin local store
 
-- Backend stores structured history in a local SQLite DB:
-  - `rag_service/ai_history.db`
-- Tables (see also `todos/DB.md` for the intended model):
-  - `edit_events`: timestamp, actor, trigger, prompt_hash, summary
-  - `file_changes`: edit_id, file_path, change_type, unified diff, lines_added/lines_removed, old/new hashes, old_content/new_content
-- Endpoints:
-  - `POST /edit_events/create`: store an edit event + changes
-  - `GET /edit_events/list?limit=...`: list history with per-file diffs and added/removed counts
-  - `POST /edit_events/undo/{edit_id}`: returns tool calls to restore previous content via `write_file`
-- Plugin behavior:
-  - `editor_tool_executor.gd` returns an `edit_record` (old/new content) for file write/patch tools.
-  - `ai_dock.gd` posts those records to `/edit_events/create`.
-  - Undo in the History tab calls `/edit_events/undo/{id}` and executes the returned tool calls.
+- **Backend** (`rag_service/ai_history.db`): `POST /edit_events/create` (plugin posts after tool runs), `GET /edit_events/list`, `POST /edit_events/undo/{id}` (returns tool calls to restore content). The **Edit History** tab in the plugin shows this server-backed list and can trigger undo via the backend.
+- **Plugin local store** (`user://godot_ai_assistant_edits.json`): Timeline of applied file/node changes for the **Pending & Timeline** tab, file/node status for 🟢🟡🔴 indicators, and **Revert** (writes `old_content` back without calling the backend). So: server history = list/undo from API; local store = per-session timeline + revert.
+
+### 7.3 Dock layout
+
+- AI dock is in `DOCK_SLOT_RIGHT_UL`; root `custom_minimum_size = Vector2(260, 220)`, `TabContainer` has `clip_contents = true`. Chat output uses word wrap; status label uses ellipsis so it doesn’t force width.
+
+### 7.4 Action types and display
+
+- `ai_edit_store.gd` defines action constants and `get_action_icon()` / `get_action_label()` (e.g. 📄 Add file, ✏️ Write file, 🧩 Create component). Executor returns `edit_record` with `action_type`, `summary`; file and node changes are recorded with `action_type`. Chat appends a formatted “**Editor actions**” section (icon + label + summary). Timeline shows the same icons and summaries.
+
+### 7.5 Editor decorations (styling and discovery)
+
+- **Styling constants** (`ai_edit_store.gd`): All markers are centralized so “staged” state is consistent across script tabs, FileSystem tree, and Scene tree.
+  - File: `FILE_MARKER_CREATED` 🟢, `FILE_MARKER_MODIFIED` 🟡, `FILE_MARKER_DELETED` ⚫, `FILE_MARKER_FAILED` 🔴.
+  - Node: `NODE_MARKER_CREATED` 🧩 (component just created), `NODE_MARKER_MODIFIED` 🟡.
+  - `GodotAIEditStore.strip_markers(s)` strips any of these so decorations can be re-applied without duplicating prefixes.
+- **Discovery (no brittle find_child by name)**:
+  - **Script tabs**: Use `EditorInterface.get_script_editor()`, then find the TabBar under it; match each tab to `get_open_scripts()[i].resource_path` so markers use the exact script path from `file_status`.
+  - **FileSystem tree**: Use `EditorInterface.get_file_system_dock()`, then find the Tree under it. No reliance on a node named `FileSystemDock` in the base control.
+  - **Scene tree**: Try `SceneTreeDock` / `Scene` under base; if not found, try `EditorInterface.get_editor_main_screen()` and find `SceneTreeEditor` → Tree. Ensures markers work across different editor layouts/versions.
+- **Path matching**: FileSystem tree items may store path in metadata; `_normalize_path_for_match()` normalizes slashes and converts project-absolute paths to `res://` so `file_status` keys (often `res://`) match. Fallback: suffix match on filename when metadata is not a path.
+- **When decorations run**: First run is `call_deferred("_apply_editor_decorations")` so FileSystem, Script, and Scene docks exist before searching. A 1s timer refreshes decorations so new tabs/trees get markers.
+
+### 7.6 Chat tabs and settings
+
+- **New chat**: Creating a new chat calls `_ensure_chat_has_messages()` and `_update_context_usage_label()` so the new chat’s state and context label are in sync (no stale context from the previous chat).
+- **Settings**: Only the main dock tab “Settings” is used; there is no Settings button on the chat bar. Users change settings via the main Settings tab.
 
 ---
 
-## 10. Context builder (efficient prompt assembly)
+## 8. Context builder (efficient prompt assembly)
 
 - Goal: only send what’s necessary; stable ordering; budget-aware trimming.
 - Model context limits live in `rag_service/app/context_builder.py` (e.g. `gpt-4.1-mini` uses a conservative `32768`).
@@ -420,8 +461,10 @@ In **all** modes:
   - The plugin sends `context.current_script` and may send `context.extra.active_file_text`.
   - The plugin always sends `context.extra.project_root_abs` so the backend can read project files directly from disk (playground/local assumption).
   - If `active_file_text` is missing, the backend reads the active file from disk.
-- Structural proximity:
-  - Backend scans the active file text for referenced `res://...` paths and includes up to a few related files as a separate block.
+- Structural proximity (repo index):
+  - When `project_root_abs` is present, the context builder uses the **repo index** (`get_related_res_paths`) to find related files from the SQLite graph (outbound: what this file references/instances; inbound: what references this file), then reads those files and adds them as the “Related files” block. If the project is not yet indexed, it runs a one-off incremental index. See §9.
+- Repair memory (lint fixes):
+  - When `context.extra.errors_text` or `context.extra.lint_output` is present, the backend looks up past fixes for the same normalized error signature (`search_lint_fixes`) and appends a “Past lint fixes (repair memory)” block to optional extras so the LLM can reuse proven diffs. See §10.
 - Recency working set:
   - Backend pulls recent diffs from SQLite and includes them as lightweight context.
 - Compression vs truncation:
@@ -431,7 +474,30 @@ In **all** modes:
 
 ---
 
-## 8. Testing & Diagnostics Summary
+## 9. Repo indexing (SQLite)
+
+- **Purpose**: Fast local graph of “what files exist” and “how they are connected” (scenes → scripts/resources, scripts → `res://` refs, `project.godot` → main/autoload) for structural context without touching Chroma.
+- **Storage**: Per-project DB at `rag_service/app/repo_index_<repo_id>.db` (repo_id = hash of project root path) to avoid lock contention when multiple projects or processes are used.
+- **Schema**: `repos`, `index_runs`, `files` (path_rel, kind, language, size, mtime, sha256), `edges` (src_rel, dst_res, edge_type: e.g. `attaches_script`, `instances_scene`, `main_scene`, `autoload`, `references_res_path`).
+- **Indexing**: `index_repo(project_root_abs, ...)` walks project files (`.godot`, `.tscn`, `.tres`, `.gd`, `.cs`, `.gdshader`), parses `project.godot` and `.tscn` for edges, and optionally scans text for `res://` refs. **Incremental**: only re-parses files whose mtime/size changed; deletes edges for changed sources and removes rows for deleted files.
+- **API**: `get_related_res_paths(project_root_abs, active_file_res_path, max_outbound=8, max_inbound=4)` returns a list of `res://` paths (existing files only) for outbound deps and inbound refs, used by the context builder for the “Related files” block.
+- **CLI**: From `rag_service/`, `python scripts/repo-indexer/index_repo.py --project-root "C:\path\to\GodotProject"` (script adds `rag_service` to `sys.path` so `app` imports work).
+
+---
+
+## 10. Repair memory (lint fix storage)
+
+- **Purpose**: Store lint failure → successful fix (diff + optional explanation) so the same or similar errors get “past fix” context and the LLM produces more consistent Godot 4.x GDScript.
+- **Storage**: Single SQLite DB `rag_service/app/repair_memory.db` with `lint_sessions`, `lint_errors`, `lint_fixes`. Not training the model—improving the **retrieval** layer.
+- **Normalization**: Raw lint output is normalized (strip paths, line/column, quoted identifiers) and hashed with `engine_version` to form `error_hash` so repeated identical errors collapse.
+- **Endpoints**:
+  - `POST /lint_memory/record_fix`: body `project_root_abs`, `file_path`, `engine_version`, `raw_lint_output`, `old_content`, `new_content`, optional `prompt`. Stores session + error + fix (unified diff). If OpenAI is configured, requests a short “explanation” of the fix for the record.
+  - `GET /lint_memory/search?engine_version=...&raw_lint_output=...&limit=...`: returns matching past fixes (same `error_hash`) for in-context injection.
+- **Plugin**: When auto-lint fix runs and lint later passes, the dock posts the fix (first failure output + before/after content) to `record_fix`. When asking the backend to fix lint, it sends `context.extra.lint_output` so the context builder can attach “Past lint fixes” when available.
+
+---
+
+## 11. Testing & Diagnostics Summary
 
 - `run_backend.ps1`:
   - Start/stop backend with proper venv activation.
@@ -457,20 +523,13 @@ In **all** modes:
 
 ---
 
-## 9. Open Questions / Future Work (for Future LLMs)
+## 12. Implementation notes (for future LLMs)
 
-- **Editor tools** are implemented: create_file, write_file, apply_patch, create_script, create_node, set_node_property. Future work could add Undo/Redo integration, or tools that operate on the “current” script/scene (infer from editor state).
-- **Better tagging / roles**:
-  - Expand tags beyond basic player/enemy/UI to cover common patterns (camera, inventory, dialogue, VFX).
-- **Shader-specific insights**:
-  - Currently treat `.gdshader` mostly as text examples.
-  - Future: parse and categorize shaders by function (post-process, material, UI effect, etc.).
-- **Per-project normalization**:
-  - Consider normalizing importance scores so every project yields a healthy mix of top/mid-tier examples.
-
-Future LLMs working on this repo should **respect this context** and maintain consistency with:
-
-- The Chroma schema (`docs` and `project_code` metadata).
-- The importance tiers for code retrieval.
-- The Godot plugin’s data contract for `/query` (`QueryRequest`, `QueryResponse`).
+- **Streaming + tool calls**: `POST /query_stream_with_tools` streams answer text first, then two sentinel blocks: `__TOOL_CALLS__` + JSON array of tool calls, then `__USAGE__` + JSON context_usage. The plugin parses these to run editor tools and update the context label. Tool calls executed on the backend (e.g. read_file when `project_root_abs` is set) are already resolved in that array; only `execute_on_client: true` tools are run in Godot.
+- **project_root_abs**: The plugin sends `context.extra.project_root_abs` (absolute path to the project folder containing `project.godot`). The backend uses it to read files on disk (read_file, list_files, read_import_options), to build context (active file, related files via repo index), and for repair memory / edit_events. When opening Godot, open the **project folder** (e.g. `godot_plugin`), not the parent repo root, so paths and plugin discovery work.
+- **Plugin tab reorder**: Use `TabBar.drag_to_rearrange_enabled = true` and, for `TabContainer`, `get_tab_bar().drag_to_rearrange_enabled = true`. If the main tab handler relies on indices, switch to the selected **child node name** (e.g. `child.name == "Settings"`) so behavior is correct after the user drag-reorders tabs. For a custom TabBar synced to data (e.g. chat tabs), connect `active_tab_rearranged` and reorder the data array to match the new tab order.
+- **Shutdown noise**: Backend uses a custom asyncio exception handler and a logging filter to suppress `CancelledError` tracebacks on Ctrl+C; see `main.py` lifespan and `_SuppressCancelledErrorFilter`.
+- **Consistency**: Keep Chroma schema (`docs` / `project_code` metadata), importance tiers, and the plugin’s `/query` request/response contract. Editor tools are apply-immediately with local timeline + Revert; backend edit_events are for list/undo from the History tab.
+- **Editor decorations**: Use `EditorInterface.get_file_system_dock()` and `EditorInterface.get_script_editor()` to get the real dock nodes instead of `base.find_child("FileSystemDock", true, false)` (control names can vary by version/locale). Match script tabs to paths via `get_open_scripts()[i].resource_path`. Run the first decoration with `call_deferred("_apply_editor_decorations")` so docks exist before searching for their Tree/TabBar. Normalize paths when matching FileSystem metadata to `file_status` keys (e.g. `res://` form). Use `ProjectSettings.globalize_path("res://")` for project root (Godot 4 has no `ProjectSettings.resource_path`).
+- **Godot 4 / GDScript**: `NodePath` has no `trim_prefix`/`path_join`—use `str(node_path).trim_prefix(...)`. Cannot use bare `_` as discard variable; use e.g. `var _x := ...`. If the dock fails to load, use `get_node_or_null()` in `_ready()` for optional nodes so one missing path does not prevent the plugin from loading.
 

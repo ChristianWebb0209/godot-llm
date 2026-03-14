@@ -22,6 +22,6 @@ if (Test-Path $venvActivate) {
   Write-Warning "[run_backend] No venv found at .venv. Backend may fail if dependencies are missing."
 }
 
-Write-Host "[run_backend] Running: python -m uvicorn app.main:app --host $ListenHost --port $ListenPort --reload" -ForegroundColor DarkCyan
-python -m uvicorn app.main:app --host $ListenHost --port $ListenPort --reload
+Write-Host "[run_backend] Running: python -m uvicorn app.main:app --host $ListenHost --port $ListenPort --reload --log-level warning" -ForegroundColor DarkCyan
+python -m uvicorn app.main:app --host $ListenHost --port $ListenPort --reload --log-level warning
 
