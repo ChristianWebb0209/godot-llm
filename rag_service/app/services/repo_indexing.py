@@ -10,13 +10,18 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 def _db_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    # Centralized under rag_service/data/db so all SQLite files live together.
+    return os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "data", "db")
+    )
 
 
 def _db_path_for_repo_id(repo_id: str) -> str:
     # Per-repo DB avoids cross-project lock contention and keeps indexes portable.
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", repo_id or "unknown")
-    return os.path.join(_db_root(), f"repo_index_{safe}.db")
+    root = _db_root()
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, f"repo_index_{safe}.db")
 
 
 def _get_conn(db_path: str) -> sqlite3.Connection:

@@ -1,8 +1,15 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
+from ..db import list_edit_events
 from ..rag_core import SourceChunk, _collect_top_docs, _collect_code_results, _collect_code_by_extends
-from .context import format_component_scripts_block, SCRAPED_CODE_DISCLAIMER
+from .asset_library import search_asset_library
+from .context import (
+    format_component_scripts_block,
+    grep_project_files,
+    read_project_godot_ini,
+    SCRAPED_CODE_DISCLAIMER,
+)
 
 
 @dataclass
@@ -375,6 +382,174 @@ def _tool_find_references_to(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# --- New tools: get_recent_changes, grep_search, fetch_url, run, scene, node tree, signals, etc. ---
+
+def _tool_get_recent_changes(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Server-only: return last N edit events (what was recently edited)."""
+    limit = min(50, max(1, int(args.get("limit", 20))))
+    events = list_edit_events(limit=limit)
+    summaries = []
+    for e in events:
+        changes = e.get("changes") or []
+        file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
+        summaries.append({
+            "id": e.get("id"),
+            "timestamp": e.get("timestamp"),
+            "summary": e.get("summary"),
+            "file_paths": file_paths,
+        })
+    return {
+        "success": True,
+        "message": "Last %d edit(s)." % len(summaries),
+        "events": summaries,
+    }
+
+
+def _tool_grep_search(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Regex or exact pattern search in project files. Server runs when project open; else client."""
+    pattern = str(args.get("pattern") or args.get("query") or "").strip()
+    root_path = str(args.get("root_path") or "res://").strip() or "res://"
+    extensions = args.get("extensions") or []
+    max_matches = min(500, max(1, int(args.get("max_matches", 100))))
+    use_regex = bool(args.get("use_regex", True))
+    if not pattern:
+        return {"error": "pattern or query is required", "execute_on_client": False}
+    return _editor_payload(
+        "grep_search",
+        pattern=pattern,
+        root_path=root_path,
+        extensions=extensions,
+        max_matches=max_matches,
+        use_regex=use_regex,
+    )
+
+
+def _tool_fetch_url(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Server-only: HTTP GET a URL and return the response text (e.g. docs, web search result)."""
+    url = str(args.get("url") or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        return {"success": False, "message": "url is required and must be http(s)://"}
+    try:
+        import requests
+        r = requests.get(url, timeout=30, headers={"User-Agent": "Godot-AI-Assistant/1.0"})
+        r.raise_for_status()
+        text = r.text
+        if len(text) > 100_000:
+            text = text[:100_000] + "\n\n[... truncated ...]"
+        return {"success": True, "url": url, "content": text, "message": "Fetched %d chars." % len(text)}
+    except Exception as e:
+        return {"success": False, "url": url, "message": "Fetch failed: %s" % (e,)}
+
+
+def _tool_run_terminal_command(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a shell command; executed on the Godot client. Captures stdout/stderr and exit code."""
+    command = args.get("command") or args.get("cmd")
+    if isinstance(command, list):
+        command = " ".join(str(c) for c in command)
+    command = str(command or "").strip()
+    if not command:
+        return {"error": "command is required", "execute_on_client": False}
+    timeout_sec = min(300, max(1, int(args.get("timeout_seconds", 60))))
+    return _editor_payload("run_terminal_command", command=command, timeout_seconds=timeout_sec)
+
+
+def _tool_run_godot_headless(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run Godot headlessly (e.g. --path <dir> --script <path>). Executed on client; captures stdout/stderr."""
+    scene_or_script = str(args.get("scene_path") or args.get("script_path") or "").strip()
+    if not scene_or_script:
+        return {"error": "scene_path or script_path is required", "execute_on_client": False}
+    timeout_sec = min(120, max(1, int(args.get("timeout_seconds", 30))))
+    return _editor_payload(
+        "run_godot_headless",
+        scene_path=scene_or_script,
+        timeout_seconds=timeout_sec,
+    )
+
+
+def _tool_run_scene(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a scene headlessly and capture output. Executed on Godot client."""
+    scene_path = str(args.get("scene_path") or "").strip()
+    if not scene_path:
+        return {"error": "scene_path is required (e.g. res://main.tscn)", "execute_on_client": False}
+    if not scene_path.startswith("res://"):
+        scene_path = "res://" + scene_path
+    timeout_sec = min(120, max(1, int(args.get("timeout_seconds", 30))))
+    return _editor_payload("run_scene", scene_path=scene_path, timeout_seconds=timeout_sec)
+
+
+def _tool_get_node_tree(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Get the scene tree structure (current open scene or given .tscn path). Client."""
+    scene_path = str(args.get("scene_path") or "").strip()
+    return _editor_payload("get_node_tree", scene_path=scene_path or None)
+
+
+def _tool_get_signals(args: Dict[str, Any]) -> Dict[str, Any]:
+    """List signals for a node type or script. Client."""
+    node_type = str(args.get("node_type") or "").strip()
+    script_path = str(args.get("script_path") or "").strip()
+    return _editor_payload("get_signals", node_type=node_type or None, script_path=script_path or None)
+
+
+def _tool_connect_signal(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Connect a signal on a node to a callable. Client."""
+    scene_path = str(args.get("scene_path") or "").strip()
+    node_path = str(args.get("node_path") or "").strip()
+    signal_name = str(args.get("signal_name") or "").strip()
+    callable_target = str(args.get("callable_target") or "").strip()
+    if not scene_path or not node_path or not signal_name:
+        return {"error": "scene_path, node_path, and signal_name are required", "execute_on_client": False}
+    return _editor_payload(
+        "connect_signal",
+        scene_path=scene_path,
+        node_path=node_path,
+        signal_name=signal_name,
+        callable_target=callable_target or None,
+    )
+
+
+def _tool_get_export_vars(args: Dict[str, Any]) -> Dict[str, Any]:
+    """List @export variables for a script or node. Client."""
+    script_path = str(args.get("script_path") or "").strip()
+    node_path = str(args.get("node_path") or "").strip()
+    scene_path = str(args.get("scene_path") or "").strip()
+    return _editor_payload(
+        "get_export_vars",
+        script_path=script_path or None,
+        node_path=node_path or None,
+        scene_path=scene_path or None,
+    )
+
+
+def _tool_search_asset_library(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Server-only: search Godot Asset Library for addons/plugins."""
+    filter_text = str(args.get("filter") or args.get("query") or "").strip()
+    godot_version = str(args.get("godot_version") or "4.2").strip()
+    max_results = min(50, max(1, int(args.get("max_results", 20))))
+    return search_asset_library(
+        filter_text=filter_text or "plugin",
+        godot_version=godot_version,
+        max_results=max_results,
+    )
+
+
+def _tool_get_project_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Return project.godot settings. Server when project open; else client."""
+    return _editor_payload("get_project_settings")
+
+
+def _tool_get_autoloads(args: Dict[str, Any]) -> Dict[str, Any]:
+    """List autoloaded singletons from project.godot. Server when project open; else client."""
+    return _editor_payload("get_autoloads")
+
+
+def _tool_get_input_map(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Read input map (action names and bound keys) from project.godot. Server when project open; else client."""
+    return _editor_payload("get_input_map")
+
+
+def _tool_check_errors(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Return current editor Errors/Warnings panel content. Client."""
+    return _editor_payload("check_errors")
 
 
 def get_registered_tools() -> List[ToolDef]:
@@ -748,6 +923,176 @@ def get_registered_tools() -> List[ToolDef]:
                 "required": ["res_path"],
             },
             handler=_tool_find_references_to,
+        ),
+        # --- Cursor parity + Godot-specific ---
+        ToolDef(
+            name="get_recent_changes",
+            description="Return the last N edit events (what files were recently created/modified by the AI). Use to see what was just edited.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "Max number of events to return.", "default": 20, "minimum": 1, "maximum": 50},
+                },
+            },
+            handler=_tool_get_recent_changes,
+        ),
+        ToolDef(
+            name="grep_search",
+            description="Search project files with a regex or exact pattern. Returns file path, line number, and line text for each match. Use for symbol/pattern search.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex pattern or literal text to search for."},
+                    "query": {"type": "string", "description": "Alias for pattern."},
+                    "root_path": {"type": "string", "description": "Directory to search under.", "default": "res://"},
+                    "extensions": {"type": "array", "items": {"type": "string"}, "description": "Filter by extension, e.g. ['.gd','.tscn'].", "default": []},
+                    "max_matches": {"type": "integer", "description": "Max matches to return.", "default": 100, "minimum": 1, "maximum": 500},
+                    "use_regex": {"type": "boolean", "description": "If true, pattern is a regex; else literal.", "default": True},
+                },
+                "required": [],
+            },
+            handler=_tool_grep_search,
+        ),
+        ToolDef(
+            name="fetch_url",
+            description="Fetch the content of a URL via HTTP GET (e.g. docs, API page). Use to look up external documentation.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL to fetch (must be http:// or https://)."},
+                },
+                "required": ["url"],
+            },
+            handler=_tool_fetch_url,
+        ),
+        ToolDef(
+            name="run_terminal_command",
+            description="Run a shell command on the user's machine. Captures stdout, stderr, and exit code. Use for running scripts, godot --headless, or build commands.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "Shell command to run."},
+                    "timeout_seconds": {"type": "integer", "description": "Max time to wait.", "default": 60, "minimum": 1, "maximum": 300},
+                },
+                "required": ["command"],
+            },
+            handler=_tool_run_terminal_command,
+        ),
+        ToolDef(
+            name="run_godot_headless",
+            description="Run Godot headlessly with a scene or script path. Captures stdout/stderr and exit code. Enables write-run-observe-fix loop.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "res:// path to scene or script to run."},
+                    "script_path": {"type": "string", "description": "Alias for scene_path."},
+                    "timeout_seconds": {"type": "integer", "description": "Max time to wait.", "default": 30, "minimum": 1, "maximum": 120},
+                },
+                "required": [],
+            },
+            handler=_tool_run_godot_headless,
+        ),
+        ToolDef(
+            name="run_scene",
+            description="Run a Godot scene headlessly and capture output/errors. Critical for test-driven agent loop.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "res:// path to the scene, e.g. res://main.tscn"},
+                    "timeout_seconds": {"type": "integer", "description": "Max time to wait.", "default": 30, "minimum": 1, "maximum": 120},
+                },
+                "required": ["scene_path"],
+            },
+            handler=_tool_run_scene,
+        ),
+        ToolDef(
+            name="get_node_tree",
+            description="Get the scene tree structure (node names, types, hierarchy) for the current open scene or a given .tscn path.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "Optional. res://path/to/scene.tscn; omit for current open scene."},
+                },
+            },
+            handler=_tool_get_node_tree,
+        ),
+        ToolDef(
+            name="get_signals",
+            description="List available signals for a node type or script (name, arguments). Use to reason about signal connections.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "node_type": {"type": "string", "description": "Built-in node type, e.g. Button, CharacterBody2D."},
+                    "script_path": {"type": "string", "description": "res:// path to script to inspect for signals."},
+                },
+            },
+            handler=_tool_get_signals,
+        ),
+        ToolDef(
+            name="connect_signal",
+            description="Connect a signal on a node to a callable (e.g. another node's method).",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "scene_path": {"type": "string", "description": "res:// path to the scene."},
+                    "node_path": {"type": "string", "description": "Path to the node in the scene."},
+                    "signal_name": {"type": "string", "description": "Name of the signal."},
+                    "callable_target": {"type": "string", "description": "Target node path and method, e.g. ../Player/on_clicked."},
+                },
+                "required": ["scene_path", "node_path", "signal_name"],
+            },
+            handler=_tool_connect_signal,
+        ),
+        ToolDef(
+            name="get_export_vars",
+            description="List @export variables for a script or node (name, type, default). Essential for understanding inspector-configurable state.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "script_path": {"type": "string", "description": "res:// path to script."},
+                    "scene_path": {"type": "string", "description": "Scene path if inspecting a node's script."},
+                    "node_path": {"type": "string", "description": "Node path in scene if inspecting attached script."},
+                },
+            },
+            handler=_tool_get_export_vars,
+        ),
+        ToolDef(
+            name="search_asset_library",
+            description="Search the Godot Asset Library for addons/plugins by keyword. Returns asset title, author, support level, browse URL.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "string", "description": "Search keyword."},
+                    "query": {"type": "string", "description": "Alias for filter."},
+                    "godot_version": {"type": "string", "description": "Godot version filter.", "default": "4.2"},
+                    "max_results": {"type": "integer", "description": "Max assets to return.", "default": 20, "minimum": 1, "maximum": 50},
+                },
+            },
+            handler=_tool_search_asset_library,
+        ),
+        ToolDef(
+            name="get_project_settings",
+            description="Read project.godot settings (key-value by section). Use to see display, rendering, or other config.",
+            parameters={"type": "object", "properties": {}},
+            handler=_tool_get_project_settings,
+        ),
+        ToolDef(
+            name="get_autoloads",
+            description="List autoloaded singletons from project.godot (name and path). Agents need to know what is globally available.",
+            parameters={"type": "object", "properties": {}},
+            handler=_tool_get_autoloads,
+        ),
+        ToolDef(
+            name="get_input_map",
+            description="Read the input map from project.godot (action names and bound keys). Use when writing input handling code.",
+            parameters={"type": "object", "properties": {}},
+            handler=_tool_get_input_map,
+        ),
+        ToolDef(
+            name="check_errors",
+            description="Return the current editor Errors/Warnings panel content (script errors, etc.). Godot equivalent of linter output.",
+            parameters={"type": "object", "properties": {}},
+            handler=_tool_check_errors,
         ),
     ]
 

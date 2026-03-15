@@ -17,7 +17,7 @@ _code_collection = None
 
 def get_chroma_client() -> chromadb.PersistentClient:
     """
-    Lazily create a persistent ChromaDB client pointing at ../chroma_db.
+    Lazily create a persistent ChromaDB client pointing at rag_service/data/chroma_db.
     Uses OpenAI embeddings if OPENAI_API_KEY is set, otherwise falls back to
     Chroma's default embedding behavior.
     """
@@ -26,7 +26,7 @@ def get_chroma_client() -> chromadb.PersistentClient:
         return _chroma_client
 
     db_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "chroma_db")
+        os.path.join(os.path.dirname(__file__), "..", "..", "data", "chroma_db")
     )
     os.makedirs(db_root, exist_ok=True)
 
@@ -49,7 +49,7 @@ def get_chroma_client() -> chromadb.PersistentClient:
     try:
         _docs_collection = _chroma_client.get_collection("docs")
         if embedding_fn is not None:
-            from .console_log import yellow, dim
+            from .services.console_service import yellow, dim
             print(yellow("chroma") + " " + dim("'docs' exists with different embedding; reusing."))
     except Exception:
         _docs_collection = _chroma_client.get_or_create_collection(
@@ -59,7 +59,7 @@ def get_chroma_client() -> chromadb.PersistentClient:
     try:
         _code_collection = _chroma_client.get_collection("project_code")
         if embedding_fn is not None:
-            from .console_log import yellow, dim
+            from .services.console_service import yellow, dim
             print(yellow("chroma") + " " + dim("'project_code' exists with different embedding; reusing."))
     except Exception:
         _code_collection = _chroma_client.get_or_create_collection(

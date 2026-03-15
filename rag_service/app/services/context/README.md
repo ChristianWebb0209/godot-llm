@@ -14,4 +14,4 @@ Context building is split by concern:
 
 **Conversation and the editor chat:** The full conversation with the AI is stored locally in the chat (editor plugin). That history is relevant to context: it gives the model dialogue continuity (what was already asked, what was suggested). To use it, the plugin can send e.g. `request_context.extra["conversation_history"]` as a list of `{"role": "user"|"assistant", "content": "..."}`. Then the server can pass it to `build_conversation_context()` and include it as a block (with a priority so it can be dropped when context fills). Not wired yet; see `conversation.build_conversation_context`.
 
-**Orchestration:** `app.context_builder` composes these modules and exposes the same public API for `main.py` (e.g. `build_ordered_blocks`, `blocks_to_user_content`, `build_related_files_context`).
+**Orchestration:** `app.services.context.context_builder` composes these modules and exposes the same public API for `main.py` (e.g. `build_ordered_blocks`, `blocks_to_user_content`, `build_related_files_context`).

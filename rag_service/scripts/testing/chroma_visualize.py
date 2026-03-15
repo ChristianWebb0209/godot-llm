@@ -11,10 +11,10 @@ import uvicorn
 def get_db_root() -> Path:
     """
     Resolve the ChromaDB root used by the rest of the project.
-    Defaults to ../../../chroma_db relative to this file.
+    Defaults to rag_service/data/chroma_db relative to this file.
     """
     base = Path(__file__).resolve()
-    return (base.parent / ".." / ".." / "chroma_db").resolve()
+    return (base.parent / ".." / ".." / "data" / "chroma_db").resolve()
 
 
 def get_client() -> chromadb.PersistentClient:

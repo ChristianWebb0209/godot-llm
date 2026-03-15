@@ -411,6 +411,120 @@ def search_project_files(
     return out
 
 
+def grep_project_files(
+    project_root_abs: str,
+    pattern: str,
+    root_path: str = "res://",
+    extensions: Optional[List[str]] = None,
+    max_matches: int = 100,
+    use_regex: bool = True,
+) -> List[Dict[str, Any]]:
+    """
+    Search project files for a pattern (regex or literal). Returns list of
+    {"path": res://, "line_no": int, "line": str} per match.
+    """
+    if not project_root_abs or not os.path.isdir(project_root_abs) or not pattern:
+        return []
+    rp = root_path.replace("\\", "/").strip()
+    if rp.startswith("res://"):
+        rp = rp[len("res://"):].lstrip("/")
+    root = os.path.abspath(os.path.join(project_root_abs, rp))
+    if not root.startswith(os.path.abspath(project_root_abs)):
+        return []
+    exts = set()
+    if extensions:
+        for e in extensions:
+            e = (e or "").strip().lower()
+            if e and not e.startswith("."):
+                e = "." + e
+            if e:
+                exts.add(e)
+    try:
+        re_pat = re.compile(pattern, re.IGNORECASE) if use_regex else re.compile(re.escape(pattern), re.IGNORECASE)
+    except re.error:
+        re_pat = re.compile(re.escape(pattern), re.IGNORECASE)
+    out: List[Dict[str, Any]] = []
+
+    def scan_file(file_abs: str, file_res: str) -> None:
+        if len(out) >= max_matches:
+            return
+        try:
+            with open(file_abs, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        except Exception:
+            return
+        for i, line in enumerate(lines, 1):
+            if len(out) >= max_matches:
+                return
+            if re_pat.search(line):
+                out.append({
+                    "path": "res://" + file_res.replace("\\", "/"),
+                    "line_no": i,
+                    "line": line.rstrip("\n\r"),
+                })
+
+    def walk(dir_abs: str, dir_res: str) -> None:
+        if len(out) >= max_matches:
+            return
+        try:
+            entries = os.listdir(dir_abs)
+        except OSError:
+            return
+        for name in sorted(entries):
+            if len(out) >= max_matches:
+                return
+            if name.startswith(".") and name == ".godot":
+                continue
+            child_abs = os.path.join(dir_abs, name)
+            child_res = (dir_res + "/" + name) if dir_res else name
+            if os.path.isdir(child_abs):
+                walk(child_abs, child_res)
+                continue
+            if exts:
+                ext = "." + (os.path.splitext(name)[1] or "").lower()
+                if ext not in exts:
+                    continue
+            scan_file(child_abs, child_res)
+
+    start_res = rp.replace("\\", "/") if rp else ""
+    if os.path.isdir(root):
+        walk(root, start_res)
+    return out
+
+
+def read_project_godot_ini(project_root_abs: str) -> Dict[str, Dict[str, str]]:
+    """
+    Read project.godot and return a dict of section -> { key: value }.
+    Used for [autoload], [input], and other sections.
+    """
+    if not project_root_abs or not os.path.isdir(project_root_abs):
+        return {}
+    path = os.path.join(project_root_abs, "project.godot")
+    if not os.path.isfile(path):
+        return {}
+    result: Dict[str, Dict[str, str]] = {}
+    current: Optional[str] = None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith(";"):
+                    continue
+                if line.startswith("[") and line.endswith("]"):
+                    current = line[1:-1].strip()
+                    if current:
+                        result.setdefault(current, {})
+                    continue
+                if current and "=" in line:
+                    k, _, v = line.partition("=")
+                    key = k.strip().strip('"')
+                    val = v.strip().strip('"')
+                    result[current][key] = val
+    except Exception:
+        pass
+    return result
+
+
 def extract_structural_deps(text: str) -> List[str]:
     """
     Heuristic dependency extraction: res:// paths from preload/load/extends/ResourceLoader.

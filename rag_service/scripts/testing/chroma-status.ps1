@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ragServiceDir = (Resolve-Path (Join-Path $scriptDir '..\..')).Path
-$dbRoot = Join-Path $ragServiceDir 'chroma_db'
+$dbRoot = Join-Path $ragServiceDir 'data\chroma_db'
 
 $logDir = Join-Path $scriptDir 'logs'
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null

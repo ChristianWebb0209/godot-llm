@@ -33,19 +33,17 @@ from .services.tools import (
 )
 from .db import (
     create_edit_event,
+    create_lint_fix_record,
+    format_fixes_for_prompt,
     get_edit_event,
     get_usage_totals,
     init_db,
     list_edit_events,
     list_recent_file_changes,
     record_usage,
-)
-from .repair_memory import (
-    create_lint_fix_record,
-    format_fixes_for_prompt,
     search_lint_fixes,
 )
-from .context_builder import (
+from .services.context.context_builder import (
     build_context_usage,
     build_current_scene_scripts_context,
     build_ordered_blocks,
@@ -63,12 +61,14 @@ from .services.context import (
     apply_project_patch,
     apply_project_patch_unified,
     build_conversation_context,
+    grep_project_files,
     list_project_directory,
+    read_project_godot_ini,
     search_project_files,
     write_project_file,
 )
 from .services.context.viewer import build_context_view
-from .console_log import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
+from .services.console_service import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
 
 
 load_dotenv()  # Load environment variables from .env if present.
@@ -1169,6 +1169,54 @@ def _run_query_with_tools(
                             "res_path": res_path,
                             "references": refs,
                         }
+                elif name == "grep_search" and project_root_abs:
+                    pattern = str(args_dict.get("pattern") or args_dict.get("query") or "").strip()
+                    if not pattern:
+                        tool_output = dispatch_tool_call(name, args_dict)
+                    else:
+                        root_path = (args_dict.get("root_path") or "res://").strip() or "res://"
+                        extensions = args_dict.get("extensions") or []
+                        max_matches = min(500, max(1, int(args_dict.get("max_matches", 100))))
+                        use_regex = bool(args_dict.get("use_regex", True))
+                        matches = grep_project_files(
+                            project_root_abs,
+                            pattern,
+                            root_path=root_path,
+                            extensions=extensions,
+                            max_matches=max_matches,
+                            use_regex=use_regex,
+                        )
+                        tool_output = {
+                            "success": True,
+                            "message": "Found %d match(es)." % len(matches),
+                            "pattern": pattern,
+                            "matches": matches,
+                        }
+                elif name == "get_project_settings" and project_root_abs:
+                    ini = read_project_godot_ini(project_root_abs)
+                    tool_output = {
+                        "success": True,
+                        "message": "Project settings (project.godot sections).",
+                        "sections": {k: v for k, v in ini.items()},
+                    }
+                elif name == "get_autoloads" and project_root_abs:
+                    ini = read_project_godot_ini(project_root_abs)
+                    autoload = ini.get("autoload", {})
+                    items = [{"name": k, "path": v} for k, v in autoload.items()]
+                    tool_output = {
+                        "success": True,
+                        "message": "Autoloads from project.godot.",
+                        "autoloads": items,
+                    }
+                elif name == "get_input_map" and project_root_abs:
+                    ini = read_project_godot_ini(project_root_abs)
+                    inp = ini.get("input", {})
+                    items = [{"action": k, "events": v} for k, v in inp.items()]
+                    tool_output = {
+                        "success": True,
+                        "message": "Input map from project.godot.",
+                        "input_map": items,
+                    }
                 elif name == "create_file" and project_root_abs:
                     path = (args_dict.get("path") or "").strip()
                     if not path:

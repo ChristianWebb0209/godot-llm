@@ -829,7 +829,7 @@ def index_in_chromadb(
     # Ensure .env is loaded so OPENAI_ env vars are visible here as well.
     load_dotenv()
 
-    db_root = (Path(__file__).parent / ".." / ".." / ".." / "chroma_db").resolve()
+    db_root = (Path(__file__).parent / ".." / ".." / ".." / "data" / "chroma_db").resolve()
     db_root.mkdir(parents=True, exist_ok=True)
 
     client = chromadb.PersistentClient(path=str(db_root))

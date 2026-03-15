@@ -34,14 +34,14 @@ def log(msg: str) -> None:
 
 def get_chroma_client() -> chromadb.PersistentClient:
     """
-    Create a persistent Chroma client pointing at ../../../chroma_db
-    (same convention as the project parser).
+    Create a persistent Chroma client pointing at rag_service/data/chroma_db
+    (same convention as the project parser and backend).
     """
     # Ensure .env is loaded so OPENAI_ env vars are visible here as well.
     load_dotenv()
 
     base = Path(__file__).resolve()
-    db_root = (base.parent / ".." / ".." / ".." / "chroma_db").resolve()
+    db_root = (base.parent / ".." / ".." / ".." / "data" / "chroma_db").resolve()
     db_root.mkdir(parents=True, exist_ok=True)
     return chromadb.PersistentClient(path=str(db_root))
 
