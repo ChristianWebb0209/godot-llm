@@ -37,6 +37,9 @@ __pycache__/
 checkpoints/
 merged/
 
+# RAG test run outputs
+rag_service/testing/results/
+
 # Colab / runtime
 colab/**/*.ipynb_checkpoints/
 .DS_Store
