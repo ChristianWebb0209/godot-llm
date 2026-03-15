@@ -348,6 +348,9 @@ def load_tokenizer_and_model() -> tuple[AutoTokenizer, AutoModelForCausalLM]:
             raise
 
     model = get_peft_model(model, lora_config)
+    # Required for gradient checkpointing + LoRA: otherwise backward fails with
+    # "element 0 of tensors does not require grad".
+    model.enable_input_require_grads()
     return tokenizer, model
 
 
@@ -360,6 +363,10 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     Build an SFTTrainer for supervised fine-tuning.
     We train the model to generate the 'text' field.
     Tuned for ~15 GB Colab GPU: batch_size=1, max_seq_length=1024, gradient_checkpointing.
+
+    To resume from a checkpoint after interrupt: call
+      trainer.train(resume_from_checkpoint=True)
+    (uses latest checkpoint in output_dir, e.g. ./godot-tools-lora/checkpoint-200).
     """
     training_args = TrainingArguments(
         output_dir="./godot-tools-lora",

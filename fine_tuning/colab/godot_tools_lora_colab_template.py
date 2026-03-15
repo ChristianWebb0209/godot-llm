@@ -199,12 +199,14 @@ trainer = build_trainer(tokenizer, model, dataset)
 
 # ## 6. Train and save adapters
 #
-# This may take a while depending on GPU. After training, we save the LoRA
-# adapter and tokenizer to a local folder for download or later upload to a
-# model hub.
+# This may take a while depending on GPU. To resume after an interrupt (e.g. if
+# you already have ./godot-tools-lora/checkpoint-200): use
+#   trainer.train(resume_from_checkpoint=True)
+# Otherwise use trainer.train() for a fresh run.
 
 
 trainer.train()
+# To resume after an interrupt: trainer.train(resume_from_checkpoint=True)
 
 adapter_out_dir = "godot-tools-lora-adapter"
 trainer.model.save_pretrained(adapter_out_dir)
