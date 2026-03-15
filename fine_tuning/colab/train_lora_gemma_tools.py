@@ -335,9 +335,17 @@ def load_tokenizer_and_model() -> tuple[AutoTokenizer, AutoModelForCausalLM]:
             device_map="auto",
             trust_remote_code=True,
         )
-    except (RuntimeError, ModuleNotFoundError, OSError) as e:
-        if "triton" in str(e).lower() or "bitsandbytes" in str(e).lower() or "libbitsandbytes" in str(e).lower():
-            # Fallback: load in bfloat16 without 4-bit (needs more VRAM but works without bitsandbytes CUDA/triton)
+    except (RuntimeError, ModuleNotFoundError, OSError, ValueError) as e:
+        msg = str(e).lower()
+        if (
+            "triton" in msg
+            or "bitsandbytes" in msg
+            or "libbitsandbytes" in msg
+            or "4bit" in msg
+            or "quantized model" in msg
+            or "dispatched on the cpu or the disk" in msg
+        ):
+            # Fallback: load in bfloat16 without 4-bit (needs more VRAM but works without bitsandbytes / 4-bit quirks)
             model = AutoModelForCausalLM.from_pretrained(
                 BASE_MODEL_ID,
                 torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
