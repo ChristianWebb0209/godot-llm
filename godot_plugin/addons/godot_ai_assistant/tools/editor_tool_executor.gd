@@ -67,6 +67,30 @@ func execute(output: Dictionary) -> Dictionary:
 			return _node_actions.execute_modify_attribute(output) if _node_actions else {"success": false, "message": "Editor not available."}
 		"lint_file":
 			return _execute_lint_file(output)
+		"grep_search":
+			return GodotAIFS.execute_grep_search(self, output)
+		"run_terminal_command":
+			return {"success": false, "message": "Use async execution for run_terminal_command."}
+		"run_godot_headless":
+			return {"success": false, "message": "Use async execution for run_godot_headless."}
+		"run_scene":
+			return {"success": false, "message": "Use async execution for run_scene."}
+		"get_node_tree":
+			return GodotAISceneTree.execute_get_node_tree(self, output)
+		"get_signals":
+			return GodotAISignals.execute_get_signals(self, output)
+		"connect_signal":
+			return GodotAISignals.execute_connect_signal(self, output)
+		"get_export_vars":
+			return GodotAIInspector.execute_get_export_vars(self, output)
+		"check_errors":
+			return GodotAIEditorErrors.execute_check_errors(self, output)
+		"get_project_settings":
+			return GodotAIProject.execute_get_project_settings(self, output)
+		"get_autoloads":
+			return GodotAIProject.execute_get_autoloads(self, output)
+		"get_input_map":
+			return GodotAIProject.execute_get_input_map(self, output)
 		_:
 			return {"success": false, "message": "Unknown action: %s" % action}
 
@@ -104,6 +128,30 @@ func execute_async(output: Dictionary) -> Dictionary:
 			return await _node_actions.execute_modify_attribute_async(output) if _node_actions else {"success": false, "message": "Editor not available."}
 		"lint_file":
 			return _execute_lint_file(output)
+		"grep_search":
+			return GodotAIFS.execute_grep_search(self, output)
+		"run_terminal_command":
+			return await GodotAIRun.execute_run_terminal_command(self, output)
+		"run_godot_headless":
+			return await GodotAIRun.execute_run_godot_headless(self, output)
+		"run_scene":
+			return await GodotAIRun.execute_run_scene(self, output)
+		"get_node_tree":
+			return GodotAISceneTree.execute_get_node_tree(self, output)
+		"get_signals":
+			return GodotAISignals.execute_get_signals(self, output)
+		"connect_signal":
+			return GodotAISignals.execute_connect_signal(self, output)
+		"get_export_vars":
+			return GodotAIInspector.execute_get_export_vars(self, output)
+		"check_errors":
+			return GodotAIEditorErrors.execute_check_errors(self, output)
+		"get_project_settings":
+			return GodotAIProject.execute_get_project_settings(self, output)
+		"get_autoloads":
+			return GodotAIProject.execute_get_autoloads(self, output)
+		"get_input_map":
+			return GodotAIProject.execute_get_input_map(self, output)
 		_:
 			return {"success": false, "message": "Unknown action: %s" % action}
 

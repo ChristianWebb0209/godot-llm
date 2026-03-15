@@ -2,7 +2,7 @@
 extends RefCounted
 class_name GodotAIFS
 
-## Filesystem operations: list_directory, list_files, search_files.
+## Filesystem operations: list_directory, list_files, search_files, grep_search.
 
 static func execute_list_directory(executor: GodotAIEditorToolExecutor, output: Dictionary) -> Dictionary:
 	var path: String = output.get("path", "res://")
@@ -182,4 +182,90 @@ static func execute_list_files(executor: GodotAIEditorToolExecutor, output: Dict
 		"message": "Listed %d file(s) under %s" % [paths.size(), path],
 		"path": path,
 		"paths": paths,
+	}
+
+
+static func execute_grep_search(executor: GodotAIEditorToolExecutor, output: Dictionary) -> Dictionary:
+	var pattern: String = str(output.get("pattern", output.get("query", "")))
+	var root_path: String = str(output.get("root_path", "res://"))
+	var extensions := output.get("extensions", [])
+	var max_matches: int = int(output.get("max_matches", 100))
+	var use_regex: bool = output.get("use_regex", true)
+	if pattern.strip_edges().is_empty():
+		return {"success": false, "message": "pattern or query is required"}
+	if root_path.is_empty():
+		root_path = "res://"
+	if max_matches < 1:
+		max_matches = 1
+	if max_matches > 500:
+		max_matches = 500
+	var exts: Array[String] = []
+	if extensions is Array:
+		for e in extensions:
+			var s := str(e).strip_edges()
+			if s.is_empty():
+				continue
+			if not s.begins_with("."):
+				s = "." + s
+			exts.append(s.to_lower())
+	var re: RegEx = null
+	if use_regex:
+		re = RegEx.new()
+		var err := re.compile(pattern)
+		if err != OK:
+			re = RegEx.new()
+			re.compile(RegEx.escape(pattern))
+	var matches: Array = []
+	var root_abs := executor.project_path_to_absolute(root_path)
+	var stack: Array = [{"abs": root_abs, "res": root_path, "depth": 0}]
+	while not stack.is_empty() and matches.size() < max_matches:
+		var cur: Dictionary = stack.pop_back()
+		var dir_abs: String = str(cur.get("abs", ""))
+		var dir_res: String = str(cur.get("res", ""))
+		var depth: int = int(cur.get("depth", 0))
+		var da := DirAccess.open(dir_abs)
+		if da == null:
+			continue
+		da.list_dir_begin()
+		while matches.size() < max_matches:
+			var name := da.get_next()
+			if name.is_empty():
+				break
+			if name == "." or name == "..":
+				continue
+			var child_abs := dir_abs.path_join(name)
+			var child_res := dir_res.trim_suffix("/").path_join(name)
+			if da.current_is_dir():
+				if depth < 50:
+					stack.append({"abs": child_abs, "res": child_res, "depth": depth + 1})
+				continue
+			if exts.size() > 0:
+				var ext := ("." + child_res.get_extension()).to_lower()
+				if not exts.has(ext):
+					continue
+			var txt: String = GodotAIFile.read_text_file_abs(child_abs)
+			if txt.is_empty():
+				continue
+			var lines: PackedStringArray = txt.split("\n")
+			for i in range(lines.size()):
+				if matches.size() >= max_matches:
+					break
+				var line: String = lines[i]
+				var hit: bool = false
+				if use_regex and re:
+					hit = re.search(line) != null
+				else:
+					hit = pattern in line
+				if hit:
+					matches.append({
+						"path": "res://" + child_res if not child_res.begins_with("res://") else child_res,
+						"line_no": i + 1,
+						"line": line.strip_edges(),
+					})
+		da.list_dir_end()
+	return {
+		"success": true,
+		"message": "Found %d match(es)." % matches.size(),
+		"pattern": pattern,
+		"matches": matches,
 	}

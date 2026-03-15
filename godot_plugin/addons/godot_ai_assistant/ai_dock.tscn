@@ -11,7 +11,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-custom_minimum_size = Vector2(160, 160)
+custom_minimum_size = Vector2(180, 120)
 script = ExtResource("1")
 
 [node name="TabContainer" type="TabContainer" parent="."]
@@ -22,6 +22,7 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 clip_contents = true
+use_hidden_tabs_for_min_size = false
 
 [node name="Chat" type="Control" parent="TabContainer"]
 layout_mode = 2
@@ -37,19 +38,21 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 theme_override_constants/separation = 4
+alignment = 0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 
 [node name="ChatTabBarRow" type="HBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
+alignment = 0
 theme_override_constants/separation = 6
 
 [node name="ChatsLabel" type="Label" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 layout_mode = 2
 theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
 theme_override_font_sizes/font_size = 13
-size_flags_horizontal = 4
-custom_minimum_size = Vector2(0, 0)
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(40, 0)
 text = "Chats"
 text_overrun_behavior = 3
 vertical_alignment = 1
@@ -58,7 +61,7 @@ vertical_alignment = 1
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
-custom_minimum_size = Vector2(0, 28)
+custom_minimum_size = Vector2(60, 28)
 tab_alignment = 0
 tab_close_display_policy = 2
 
@@ -126,12 +129,14 @@ collapsible = true
 layout_mode = 2
 size_flags_vertical = 3
 custom_minimum_size = Vector2(0, 60)
+horizontal_scroll_mode = 2
 script = ExtResource("3")
 
 [node name="ChatMessageList" type="VBoxContainer" parent="TabContainer/Chat/VBox/IOContainer/ChatScroll"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 3
+alignment = 0
+size_flags_horizontal = 0
 size_flags_vertical = 0
 theme_override_constants/separation = 8
 
@@ -144,12 +149,15 @@ visible = false
 
 [node name="AddContextRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
 layout_mode = 2
+alignment = 0
 size_flags_vertical = 0
 theme_override_constants/separation = 6
 
 [node name="AddCurrentScriptButton" type="Button" parent="TabContainer/Chat/VBox/IOContainer/AddContextRow"]
 layout_mode = 2
+size_flags_horizontal = 4
 size_flags_vertical = 0
+custom_minimum_size = Vector2(60, 0)
 text = "+ Add current script to context"
 tooltip_text = "Add the script currently open in the Script Editor to this chat's context (same as dragging the script tab)"
 
@@ -164,11 +172,13 @@ script = ExtResource("2")
 
 [node name="BottomRow" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
+alignment = 0
 theme_override_constants/separation = 4
 size_flags_vertical = 0
 
 [node name="ToolRow" type="HFlowContainer" parent="TabContainer/Chat/VBox/BottomRow"]
 layout_mode = 2
+alignment = 0
 theme_override_constants/h_separation = 6
 theme_override_constants/v_separation = 4
 

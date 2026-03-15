@@ -34,6 +34,9 @@ const ACTION_DELETE_FILE := "delete_file"
 const ACTION_CREATE_NODE := "create_node"
 const ACTION_SET_NODE_PROPERTY := "set_node_property"
 const ACTION_SET_IMPORT_OPTION := "set_import_option"
+const ACTION_RUN_SCENE := "run_scene"
+const ACTION_RUN_TERMINAL_COMMAND := "run_terminal_command"
+const ACTION_RUN_GODOT_HEADLESS := "run_godot_headless"
 
 ## action_type -> { icon: String, label: String }
 const _ACTION_DISPLAY: Dictionary = {
@@ -46,6 +49,9 @@ const _ACTION_DISPLAY: Dictionary = {
 	ACTION_CREATE_NODE: {"icon": "🧩", "label": "Create component"},
 	ACTION_SET_NODE_PROPERTY: {"icon": "⚙️", "label": "Set property"},
 	ACTION_SET_IMPORT_OPTION: {"icon": "⚙️", "label": "Set import option"},
+	ACTION_RUN_SCENE: {"icon": "▶️", "label": "Run scene"},
+	ACTION_RUN_TERMINAL_COMMAND: {"icon": "⌨️", "label": "Run command"},
+	ACTION_RUN_GODOT_HEADLESS: {"icon": "▶️", "label": "Run Godot headless"},
 }
 
 

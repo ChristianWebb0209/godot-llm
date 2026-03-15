@@ -89,6 +89,18 @@ static func format_tool_calls_summaries(tool_calls: Array, dock: GodotAIDock) ->
 			var path_val := payload.get("path", args.get("path", ""))
 			if path_val:
 				parts.append(str(path_val))
+		elif action == "grep_search":
+			var pattern_val := payload.get("pattern", args.get("pattern", args.get("query", "")))
+			if pattern_val:
+				parts.append(str(pattern_val))
+		elif action in ["run_scene", "run_godot_headless"]:
+			var scene_val := payload.get("scene_path", args.get("scene_path", args.get("script_path", "")))
+			if scene_val:
+				parts.append(str(scene_val))
+		elif action == "run_terminal_command":
+			var cmd_val := payload.get("command", args.get("command", args.get("cmd", "")))
+			if cmd_val:
+				parts.append(str(cmd_val).substr(0, 40) + ("..." if str(cmd_val).length() > 40 else ""))
 		out.append(" ".join(parts))
 	return out
 
@@ -256,6 +268,21 @@ func run_editor_actions_async(
 		var res_ok := result.get("success", false)
 		var node_msg := result.get("message", "OK") if res_ok else ("Error: %s" % result.get("message", "unknown"))
 		results.append(node_msg)
+		# So the model sees run output in chat context (write → run → observe → fix)
+		if action in ["run_terminal_command", "run_godot_headless", "run_scene"]:
+			var run_summary := "Ran: %s" % action
+			if action == "run_scene" or action == "run_godot_headless":
+				run_summary = "Ran: %s" % str(result.get("scene_path", ""))
+			elif action == "run_terminal_command":
+				var cmd := str(result.get("command", ""))
+				if cmd.length() > 50:
+					cmd = cmd.substr(0, 47) + "..."
+				run_summary = "Ran: %s" % cmd
+			display_changes.append({
+				"action_type": action,
+				"summary": run_summary,
+				"message": node_msg,
+			})
 		if action == "lint_file":
 			var lint_out := str(result.get("output", "")).strip_edges()
 			if not lint_out.is_empty():
