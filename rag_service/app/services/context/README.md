@@ -10,6 +10,7 @@ Context building is split by concern:
 | **docs** | Retrieved documentation: format docs + code snippets into the single “knowledge” block. |
 | **code_samples** | Repo code by type: format full script implementations by `extends_class` (component block). |
 | **conversation** | Optional chat history: when the plugin sends recent turns, format them for context. |
+| **openviking_context** | Per-chat session memory (OpenViking): commit turns for memory extraction, retrieve relevant memories via `find_memories` for the "Retrieved session memory" block. |
 | **viewer** | Build a display model from blocks + debug for the context viewer UI (per-chat); used to send `context_view` in the response. |
 
 **Conversation and the editor chat:** The full conversation with the AI is stored locally in the chat (editor plugin). That history is relevant to context: it gives the model dialogue continuity (what was already asked, what was suggested). To use it, the plugin can send e.g. `request_context.extra["conversation_history"]` as a list of `{"role": "user"|"assistant", "content": "..."}`. Then the server can pass it to `build_conversation_context()` and include it as a block (with a priority so it can be dropped when context fills). Not wired yet; see `conversation.build_conversation_context`.

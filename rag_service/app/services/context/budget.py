@@ -8,18 +8,19 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 # Priority hierarchy (lower = more important, dropped last when context fills).
-# Order: env → task → active_file → current_scene_scripts → related → recent
-# → errors → knowledge → component_scripts → extras
+# Order: env → task → session_memory → active_file → current_scene_scripts → related
+# → recent → errors → knowledge → component_scripts → extras
 PRIORITY_ENV = 0
 PRIORITY_TASK = 1
-PRIORITY_ACTIVE_FILE = 2
-PRIORITY_CURRENT_SCENE_SCRIPTS = 3
-PRIORITY_RELATED = 4
-PRIORITY_RECENT = 5
-PRIORITY_ERRORS = 6
-PRIORITY_KNOWLEDGE = 7
-PRIORITY_COMPONENT_SCRIPTS = 8  # First to drop when >50% full
-PRIORITY_EXTRAS = 9
+PRIORITY_SESSION_MEMORY = 2
+PRIORITY_ACTIVE_FILE = 3
+PRIORITY_CURRENT_SCENE_SCRIPTS = 4
+PRIORITY_RELATED = 5
+PRIORITY_RECENT = 6
+PRIORITY_ERRORS = 7
+PRIORITY_KNOWLEDGE = 8
+PRIORITY_COMPONENT_SCRIPTS = 9  # First to drop when >50% full
+PRIORITY_EXTRAS = 10
 
 MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "gpt-4.1-mini": 32768,

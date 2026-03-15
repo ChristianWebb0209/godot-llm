@@ -24,6 +24,7 @@ from . import (
     PRIORITY_KNOWLEDGE,
     PRIORITY_RECENT,
     PRIORITY_RELATED,
+    PRIORITY_SESSION_MEMORY,
     PRIORITY_TASK,
     ContextBlock,
     ContextUsage,
@@ -62,18 +63,21 @@ def build_ordered_blocks(
     current_scene_scripts: Optional[List[Tuple[str, str]]] = None,
     component_scripts_text: Optional[str] = None,
     exclude_block_keys: Optional[List[str]] = None,
+    retrieved_memories: Optional[List[str]] = None,
 ) -> List[ContextBlock]:
     """
     Compose all context sources into ordered blocks (priority hierarchy).
-    Hierarchy: env → task → active file → current scene scripts → related
+    Hierarchy: env → task → session_memory → active file → current scene scripts → related
     → recent edits → errors → knowledge (docs + code) → component_scripts → extras.
     exclude_block_keys: block keys to omit (from context viewer "Don't include next time").
+    retrieved_memories: optional OpenViking session memory snippets for this chat.
     """
     excluded = set(exclude_block_keys or [])
     limit = get_context_limit(model)
 
     env_budget = min(1200, max(600, int(limit * 0.04)))
     task_budget = min(1200, max(300, int(limit * 0.03)))
+    session_memory_budget = min(1500, max(400, int(limit * 0.06)))
     file_budget = min(5500, max(1500, int(limit * 0.18)))
     scene_scripts_budget = min(8000, max(2000, int(limit * 0.20)))
     related_budget = min(4500, max(1000, int(limit * 0.14)))
@@ -115,6 +119,19 @@ def build_ordered_blocks(
             text=f"User request:\n{question.strip()}",
         )
     )
+
+    if retrieved_memories and "session_memory" not in excluded:
+        memory_text = "\n\n".join(retrieved_memories).strip()
+        if memory_text:
+            blocks.append(
+                ContextBlock(
+                    key="session_memory",
+                    title="Retrieved session memory",
+                    priority=PRIORITY_SESSION_MEMORY + off,
+                    max_tokens=session_memory_budget,
+                    text=memory_text,
+                )
+            )
 
     if (active_file_path or active_file_text) and "active_file" not in excluded:
         file_header = (
