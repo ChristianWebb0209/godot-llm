@@ -509,6 +509,20 @@ layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "http://127.0.0.1:8000"
 
+[node name="BackendRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="Label" type="Label" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BackendRow"]
+layout_mode = 2
+size_flags_stretch_ratio = 0.35
+text = "Backend"
+
+[node name="SettingsBackendOption" type="OptionButton" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BackendRow"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+
 [node name="ApiKeyRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection"]
 layout_mode = 2
 theme_override_constants/separation = 8

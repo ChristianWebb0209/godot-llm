@@ -39,6 +39,7 @@ var status_label: Label = null  # Optional: StatusLabel removed from UI
 @onready var settings_text_size_spin: SpinBox = $TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/TextSizeRow/SettingsTextSizeSpin
 @onready var settings_word_wrap_check: CheckButton = $TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/SettingsWordWrapCheck
 @onready var settings_rag_url_edit: LineEdit = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/RagUrlRow/SettingsRagUrlEdit
+@onready var settings_backend_option: OptionButton = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BackendRow/SettingsBackendOption
 @onready var settings_api_key_edit: LineEdit = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/ApiKeyRow/SettingsApiKeyEdit
 @onready var settings_base_url_edit: LineEdit = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BaseUrlRow/SettingsBaseUrlEdit
 @onready var settings_model_option: OptionButton = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/SettingsModelRow/SettingsModelOption
@@ -154,6 +155,21 @@ func get_current_chat() -> int:
 
 func set_current_chat_index(i: int) -> void:
 	_current_chat = i
+
+## Generate a stable unique id for a new chat (used for OpenViking session memory).
+func generate_chat_id() -> String:
+	return "c_%d_%d" % [Time.get_ticks_msec(), randi() % 1000000]
+
+## Return the current chat's stable id, or empty string if none (for backend context.extra.chat_id).
+func get_current_chat_id() -> String:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return ""
+	var c = _chats[_current_chat]
+	if typeof(c) != TYPE_DICTIONARY:
+		return ""
+	var id_val = c.get("id", "")
+	return str(id_val) if id_val else ""
+
 
 func get_settings() -> GodotAISettings:
 	return _settings
@@ -372,6 +388,8 @@ func _ready() -> void:
 			tab_container.set_tab_title(3, "Pending & Timeline")
 	if settings_save_button:
 		settings_save_button.pressed.connect(_on_settings_save_pressed)
+	if settings_backend_option:
+		settings_backend_option.item_selected.connect(_on_settings_backend_selected)
 	if index_status_request:
 		index_status_request.request_completed.connect(_on_index_status_request_completed)
 	if refresh_indicators_button:
@@ -780,6 +798,9 @@ func _deferred_send_question(
 	var exclude_keys: Array = get_current_chat_exclude_context_keys()
 	if exclude_keys.size() > 0:
 		context["extra"]["exclude_block_keys"] = exclude_keys
+	var chat_id_str: String = get_current_chat_id()
+	if not chat_id_str.is_empty():
+		context["extra"]["chat_id"] = chat_id_str
 	# Include user-dragged context (files/nodes from FileSystem, Scene tree, Script list).
 	var pinned_extra: Dictionary = _build_pinned_context_extra()
 	for k in pinned_extra:
@@ -792,22 +813,23 @@ func _deferred_send_question(
 	if _settings:
 		if _settings.openai_api_key.length() > 0:
 			payload["api_key"] = _settings.openai_api_key
-		if _settings.selected_model.length() > 0:
-			payload["model"] = _settings.selected_model
+		var model := _settings.get_effective_model()
+		if model.length() > 0:
+			payload["model"] = model
 		if _settings.openai_base_url.length() > 0:
 			payload["base_url"] = _settings.openai_base_url
 	var json_body: String = JSON.stringify(payload)
 	var headers: PackedStringArray = PackedStringArray(["Content-Type: application/json"])
+	var profile_id: String = _settings.backend_profile_id if _settings else GodotAIBackendProfile.PROFILE_RAG
+	var profile := GodotAIBackendProfile.get_profile(profile_id)
+	var stream_endpoint: String = profile.get_stream_with_tools_url(rag_service_url) if use_tools else profile.get_stream_url(rag_service_url)
 	_stream_start_generation = _stream_generation
 	_stream_message_index = _chats[_current_chat]["messages"].size() - 1 if _current_chat >= 0 and _current_chat < _chats.size() else -1
 	_streaming_in_progress = true
 	_streaming_chat_index = _current_chat
 	_update_ask_button_state()
 	_push_activity("Calling AI…")
-	if use_tools:
-		_async_stream_request(rag_service_url + "/query_stream_with_tools", headers, json_body)
-	else:
-		_async_stream_request(rag_service_url + "/query_stream", headers, json_body)
+	_async_stream_request(stream_endpoint, headers, json_body)
 
 
 func _on_http_request_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
@@ -1678,11 +1700,12 @@ func _apply_settings_from_config() -> void:
 		follow_agent_check.button_pressed = _settings.follow_agent
 	# Tools and auto-lint are always on; no UI to sync.
 	if model_option:
+		var models: Array[String] = _settings.get_models_for_profile(_settings.backend_profile_id)
 		model_option.clear()
-		for i in range(_settings.get_openai_models().size()):
-			var m: String = _settings.get_openai_models()[i]
-			model_option.add_item(m, i)
-		var idx: int = _settings.get_openai_models().find(_settings.selected_model)
+		for i in range(models.size()):
+			model_option.add_item(models[i], i)
+		var current_model := _settings.get_effective_model()
+		var idx: int = models.find(current_model)
 		if idx >= 0:
 			model_option.select(idx)
 		else:
@@ -1699,9 +1722,12 @@ func _apply_display_settings() -> void:
 
 func _on_model_selected(_index: int) -> void:
 	if _settings and model_option and model_option.selected >= 0:
-		var models: Array[String] = _settings.get_openai_models()
+		var models: Array[String] = _settings.get_models_for_profile(_settings.backend_profile_id)
 		if model_option.selected < models.size():
-			_settings.selected_model = models[model_option.selected]
+			if _settings.backend_profile_id == GodotAIBackendProfile.PROFILE_GODOT_COMPOSER:
+				_settings.composer_model = models[model_option.selected]
+			else:
+				_settings.selected_model = models[model_option.selected]
 			_settings.save_settings()
 
 
@@ -1709,6 +1735,17 @@ func _on_follow_agent_toggled(_pressed: bool) -> void:
 	if _settings and follow_agent_check:
 		_settings.follow_agent = follow_agent_check.button_pressed
 		_settings.save_settings()
+
+
+func _on_settings_backend_selected(index: int) -> void:
+	var profiles: Array = GodotAIBackendProfile.get_all_profiles()
+	if index < 0 or index >= profiles.size():
+		return
+	var profile: GodotAIBackendProfile = profiles[index]
+	if _settings:
+		_settings.backend_profile_id = profile.profile_id
+	if _settings_tab:
+		_settings_tab.refresh_model_option_only()
 
 
 

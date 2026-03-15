@@ -16,6 +16,7 @@ func ensure_default_chat() -> void:
 	if _dock.get_chats().is_empty():
 		var title := "Chat 1"
 		_dock.get_chats().append({
+			"id": _dock.generate_chat_id(),
 			"title": title,
 			"messages": [],
 			"context_usage": {},
@@ -50,6 +51,8 @@ func ensure_chat_has_messages() -> void:
 		chat["context_usage"] = {}
 	if not chat.has("pinned_context"):
 		chat["pinned_context"] = []
+	if not chat.has("id") or (chat.get("id", "") as String).is_empty():
+		chat["id"] = _dock.generate_chat_id()
 
 
 func on_new_chat_pressed() -> void:
@@ -58,6 +61,7 @@ func on_new_chat_pressed() -> void:
 	var idx := _dock.get_chats().size() + 1
 	var title := "Chat %d" % idx
 	_dock.get_chats().append({
+		"id": _dock.generate_chat_id(),
 		"title": title,
 		"messages": [],
 		"context_usage": {},

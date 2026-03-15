@@ -20,21 +20,41 @@ func refresh_settings_tab_from_config() -> void:
 		_dock.settings_word_wrap_check.button_pressed = _dock.get_settings().word_wrap
 	if _dock.settings_rag_url_edit:
 		_dock.settings_rag_url_edit.text = _dock.get_settings().rag_service_url
+	if _dock.settings_backend_option:
+		_dock.settings_backend_option.clear()
+		var profiles: Array = GodotAIBackendProfile.get_all_profiles()
+		for i in range(profiles.size()):
+			var p: GodotAIBackendProfile = profiles[i]
+			_dock.settings_backend_option.add_item(p.display_name, i)
+		var current_id: String = _dock.get_settings().backend_profile_id
+		var profile_idx: int = 0
+		for i in range(profiles.size()):
+			if (profiles[i] as GodotAIBackendProfile).profile_id == current_id:
+				profile_idx = i
+				break
+		_dock.settings_backend_option.select(profile_idx)
 	if _dock.settings_api_key_edit:
 		_dock.settings_api_key_edit.text = _dock.get_settings().openai_api_key
 	if _dock.settings_base_url_edit:
 		_dock.settings_base_url_edit.text = _dock.get_settings().openai_base_url
-	if _dock.settings_model_option:
-		_dock.settings_model_option.clear()
-		for i in range(_dock.get_settings().get_openai_models().size()):
-			var m: String = _dock.get_settings().get_openai_models()[i]
-			_dock.settings_model_option.add_item(m, i)
-		var idx: int = _dock.get_settings().get_openai_models().find(_dock.get_settings().selected_model)
-		if idx >= 0:
-			_dock.settings_model_option.select(idx)
-		else:
-			_dock.settings_model_option.select(0)
+	refresh_model_option_only()
 	refresh_index_and_context_status()
+
+
+## Repopulate only the model dropdown from current backend profile (e.g. after user changes Backend).
+func refresh_model_option_only() -> void:
+	if not _dock.settings_model_option:
+		return
+	var models: Array[String] = _dock.get_settings().get_models_for_profile(_dock.get_settings().backend_profile_id)
+	_dock.settings_model_option.clear()
+	for i in range(models.size()):
+		_dock.settings_model_option.add_item(models[i], i)
+	var current_model: String = _dock.get_settings().get_effective_model()
+	var idx: int = models.find(current_model)
+	if idx >= 0:
+		_dock.settings_model_option.select(idx)
+	else:
+		_dock.settings_model_option.select(0)
 
 
 func refresh_index_and_context_status() -> void:
@@ -125,14 +145,21 @@ func save_settings_tab_to_config() -> void:
 		_dock.get_settings().word_wrap = _dock.settings_word_wrap_check.button_pressed
 	if _dock.settings_rag_url_edit:
 		_dock.get_settings().rag_service_url = _dock.settings_rag_url_edit.text.strip_edges()
+	if _dock.settings_backend_option and _dock.settings_backend_option.selected >= 0:
+		var profiles: Array = GodotAIBackendProfile.get_all_profiles()
+		if _dock.settings_backend_option.selected < profiles.size():
+			_dock.get_settings().backend_profile_id = (profiles[_dock.settings_backend_option.selected] as GodotAIBackendProfile).profile_id
 	if _dock.settings_api_key_edit:
 		_dock.get_settings().openai_api_key = _dock.settings_api_key_edit.text
 	if _dock.settings_base_url_edit:
 		_dock.get_settings().openai_base_url = _dock.settings_base_url_edit.text.strip_edges()
 	if _dock.settings_model_option and _dock.settings_model_option.selected >= 0:
-		var models: Array[String] = _dock.get_settings().get_openai_models()
+		var models: Array[String] = _dock.get_settings().get_models_for_profile(_dock.get_settings().backend_profile_id)
 		if _dock.settings_model_option.selected < models.size():
-			_dock.get_settings().selected_model = models[_dock.settings_model_option.selected]
+			if _dock.get_settings().backend_profile_id == GodotAIBackendProfile.PROFILE_GODOT_COMPOSER:
+				_dock.get_settings().composer_model = models[_dock.settings_model_option.selected]
+			else:
+				_dock.get_settings().selected_model = models[_dock.settings_model_option.selected]
 	# Sync Chat-tab toggles so one Save persists everything
 	if _dock.follow_agent_check:
 		_dock.get_settings().follow_agent = _dock.follow_agent_check.button_pressed
