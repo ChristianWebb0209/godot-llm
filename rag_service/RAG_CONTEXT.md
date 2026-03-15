@@ -7,10 +7,10 @@ This file is the **single source of truth** for how the **Godot LLM Assistant** 
 ## Quick reference for future agents
 
 - **Change a tool (add/rename/parameters)**  
-  `rag_service/app/services/tools.py`: edit `ToolDef` in `get_registered_tools()` and the handler; update `main.py` system prompt if the LLM must use it differently. Plugin: `godot_plugin/addons/godot_ai_assistant/tools/editor_tool_executor.gd` dispatches to `tools/file.gd`, `tools/fs.gd`, `tools/import.gd`, `tools/node.gd`, `tools/run.gd`, `tools/scene_tree.gd`, `tools/signals.gd`, `tools/inspector.gd`, `tools/project.gd`, `tools/editor_errors.gd` for execute_on_client actions.
+  Tool loop and execution are implemented via **Pydantic AI**. Edit `rag_service/app/services/tools.py` for `ToolDef` and handler; add a matching wrapper in `rag_service/app/services/godot_agent.py` and implement backend path (when `project_root_abs` is set) in `rag_service/app/services/tool_runner.py`. Plugin: `godot_plugin/addons/godot_ai_assistant/tools/editor_tool_executor.gd` dispatches execute_on_client actions to `tools/file.gd`, `tools/fs.gd`, etc.
 
 - **Change what the LLM sees (context / tools)**  
-  `rag_service/app/main.py`: `_run_query_with_tools` (system prompt, user blocks, tool payload, max_tool_rounds default 5). `rag_service/app/context_builder.py`: block order and budgets. Plugin sends `context.extra.conversation_history` (last N messages) for multi-turn continuity.
+  `rag_service/app/main.py`: `_run_query_with_tools` builds RAG + context blocks and user content, then calls the Pydantic AI agent (`godot_agent.run_sync`). Agent instructions and tools live in `rag_service/app/services/godot_agent.py`; tool execution in `tool_runner.execute_tool`. Context block order and budgets: `rag_service/app/services/context/` (context_builder, budget). Plugin sends `context.extra.conversation_history` and `context.extra.chat_id` (for OpenViking session memory; see §3.4).
 
 - **Change plugin UI (tabs, chat, diff, history)**  
   `godot_plugin/addons/godot_ai_assistant/ai_dock.gd` (logic) and `ai_dock.tscn` (scene). Tab selection uses **child node name** (e.g. `History`, `Settings`), not tab index.
@@ -22,7 +22,7 @@ This file is the **single source of truth** for how the **Godot LLM Assistant** 
   If the dock does not appear: check Godot Output for parse/script errors. Common causes: wrong node path in @onready (use `get_node_or_null()` in `_ready()` for optional nodes), or GDScript/Godot 4 API misuse (see §11). Open the project from the folder that contains `project.godot` (e.g. `godot_plugin`), not the parent repo root.
 
 - **read_file / list_directory / search_files (server when project open)**  
-  When the plugin sends `context.extra.project_root_abs`, the backend runs `read_file`, `list_directory`, and `search_files` on the server and returns real results to the LLM in the same request (multi-round tool loop). **read_file** results are cached per request. Lint is server-based (`/lint`); after edits the plugin can auto-send one follow-up request with lint output so the model can fix in the same “turn” (see §6.1).
+  When the plugin sends `context.extra.project_root_abs`, `tool_runner.execute_tool` runs `read_file`, `list_directory`, and `search_files` on the server (Pydantic AI agent tool loop) and returns real results to the LLM. **read_file** is cached per request in `GodotQueryDeps.read_file_cache`. Lint is server-based (`/lint`); after edits the plugin can auto-send one follow-up request with lint output so the model can fix in the same “turn” (see §6.1).
 
 - **Run backend**  
   From `rag_service/`: `.\run_backend.ps1` (or `uvicorn app.main:app --reload`). Default URL `http://127.0.0.1:8000`; plugin uses Settings or `rag_service_url`.
@@ -75,13 +75,13 @@ Important subpaths:
   - `rag_service/tools/docs-parser/index_docs.py` – index markdown → Chroma `docs`.
   - `godot_knowledge_base/docs/4.6/**` – scraped docs.
 - Project pipeline:
-  - `rag_service/tools/project-parser/analyze_project.py` – analyze/import projects.
+  - `rag_service/scripts/analyze_project.py` – analyze/import projects.
   - `godot_knowledge_base/code/demos/<slug>/` – selected important scripts/shaders.
   - Chroma `project_code` collection – indexed project code.
 - Repo indexing (structural graph):
   - `rag_service/app/services/repo_indexing.py` – SQLite-backed file/edge index per project.
   - `rag_service/data/db/repo_index_<repo_id>.db` – per-project DB (avoids lock contention).
-  - `rag_service/scripts/repo-indexer/index_repo.py` – CLI to index a Godot project root.
+  - `rag_service/scripts/index_repo.py` – CLI to index a Godot project root.
 - Repair memory (lint fixes):
   - `rag_service/app/db/repair_memory.py` – SQLite store of lint failure → fix (diff + explanation).
   - `rag_service/data/db/repair_memory.db` – single DB for all projects.
@@ -99,7 +99,7 @@ Important subpaths:
 - `POST /query`:
   - Request model:
     - `question: str`.
-    - `context` (optional): `engine_version`, `language`, `selected_node_type`, `current_script`, `extra` (includes `project_root_abs`, `active_file_text`, `active_scene_path`, `scene_tree`, `lint_output`, `conversation_history`, `exclude_block_keys`).
+    - `context` (optional): `engine_version`, `language`, `selected_node_type`, `current_script`, `extra` (includes `project_root_abs`, `active_file_text`, `active_scene_path`, `scene_tree`, `lint_output`, `conversation_history`, `exclude_block_keys`, `chat_id`).
     - `top_k: int = 8`.
     - `max_tool_rounds: Optional[int] = None` (default 5 when omitted; max tool-call rounds per request).
   - Response model:
@@ -197,7 +197,7 @@ Important subpaths:
       - Relevant code snippets (paths, importance, tags).
       - Obscure note (if applicable).
 
-### 3.5 Tools & Orchestration (`rag_service/app/services/tools.py`)
+### 3.6 Tools & Orchestration (`rag_service/app/services/tools.py`)
 
 - Tools are `ToolDef` objects (name, description, parameters, handler). `get_openai_tools_payload()` builds the OpenAI `tools=[...]` payload. `_run_query_with_tools` runs RAG, then up to **max_tool_rounds** (default 5) of LLM + tool execution; tool results are fed back so the model can “explore then act” in one request.
 - **Server-side when `project_root_abs` is set** (LLM sees real results in the same request):
@@ -374,7 +374,7 @@ Both backend and tools now share identical embedding configuration logic via `.e
 
 - **Purpose**: Graph of “what files exist” and “how they’re connected” (scenes → scripts, scripts → res:// refs, project.godot → main/autoload) for context and exploration without Chroma.
 - **Storage**: Per-project DB `rag_service/app/repo_index_<repo_id>.db`. Schema: `repos`, `index_runs`, `files` (path_rel, kind, language, …), `edges` (src_rel, dst_res, edge_type).
-- **Indexing**: `index_repo(project_root_abs, ...)` walks project files, parses .godot/.tscn for edges; incremental (mtime/size). CLI: `python scripts/repo-indexer/index_repo.py --project-root "C:\path\to\Project"`.
+- **Indexing**: `index_repo(project_root_abs, ...)` walks project files, parses .godot/.tscn for edges; incremental (mtime/size). CLI: `python scripts/index_repo.py --project-root "C:\path\to\Project"`.
 - **Context**: `get_related_res_paths(project_root_abs, active_file_res_path, max_outbound, max_inbound)` → res:// paths for “Related files” block. `get_most_referenced_res_paths` → “project core” paths.
 - **Tools**: `list_indexed_paths(project_root_abs, prefix, max_paths, max_depth)` → paths under prefix for **project_structure**. `get_inbound_refs(project_root_abs, target_res_path, limit)` → files that reference target for **find_references_to**.
 

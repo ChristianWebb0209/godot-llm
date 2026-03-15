@@ -12,11 +12,11 @@ import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
 
-# Allow importing shared script_extends from scripts/common.
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-from common.script_extends import is_native_godot_extends
+# Allow importing script_extends from same directory (scripts/).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from script_extends import is_native_godot_extends
 
 
 @dataclass
@@ -58,35 +58,58 @@ def log(message: str) -> None:
     print(message)
 
 
-# Default tag rules (used when tag_rules.json is missing).
-_DEFAULT_EXTENDS_TAGS: Dict[str, List[str]] = {
+# Tag rules: extends -> tags and path_keywords -> tags (for importance/retrieval).
+EXTENDS_TAGS: Dict[str, List[str]] = {
     "CharacterBody2D": ["2d", "movement", "character"],
     "CharacterBody3D": ["3d", "movement", "character"],
     "Node2D": ["2d"],
     "Node3D": ["3d"],
+    "RigidBody2D": ["2d", "physics"],
+    "RigidBody3D": ["3d", "physics"],
+    "StaticBody2D": ["2d", "physics"],
+    "StaticBody3D": ["3d", "physics"],
+    "PhysicsBody2D": ["2d", "physics"],
+    "PhysicsBody3D": ["3d", "physics"],
+    "Area2D": ["2d", "detection", "trigger"],
+    "Area3D": ["3d", "detection", "trigger"],
     "Control": ["ui"],
+    "Camera2D": ["2d", "camera"],
+    "Camera3D": ["3d", "camera"],
+    "Sprite2D": ["2d", "visual"],
+    "Sprite3D": ["3d", "visual"],
+    "MeshInstance2D": ["2d", "visual"],
+    "MeshInstance3D": ["3d", "visual"],
+    "AnimationPlayer": ["animation"],
+    "AnimationTree": ["animation"],
+    "AudioStreamPlayer": ["audio"],
+    "AudioStreamPlayer2D": ["audio", "2d"],
+    "AudioStreamPlayer3D": ["audio", "3d"],
+    "Resource": ["resource"],
+    "RefCounted": ["resource"],
 }
-_DEFAULT_PATH_KEYWORDS: Dict[str, List[str]] = {
-    "player": ["player"], "hero": ["player"],
-    "enemy": ["enemy", "ai"], "mob": ["enemy", "ai"],
-    "ui": ["ui", "menu"], "menu": ["ui", "menu"], "hud": ["ui", "menu"], "pause": ["ui", "menu"],
-    "level": ["level"], "world": ["level"], "map": ["level"],
-    "main": ["main"], "game": ["main"],
+PATH_KEYWORDS: Dict[str, List[str]] = {
+    "player": ["player"],
+    "hero": ["player"],
+    "enemy": ["enemy", "ai"],
+    "mob": ["enemy", "ai"],
+    "ui": ["ui", "menu"],
+    "menu": ["ui", "menu"],
+    "hud": ["ui", "menu"],
+    "pause": ["ui", "menu"],
+    "level": ["level"],
+    "world": ["level"],
+    "map": ["level"],
+    "main": ["main"],
+    "game": ["main"],
+    "autoload": ["autoload"],
+    "plugin": ["editor"],
+    "editor": ["editor"],
 }
 
 
 def _load_tag_rules() -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
-    """Load extends and path_keywords from tag_rules.json; fall back to defaults."""
-    rules_path = Path(__file__).resolve().parent / "tag_rules.json"
-    if not rules_path.exists():
-        return _DEFAULT_EXTENDS_TAGS.copy(), _DEFAULT_PATH_KEYWORDS.copy()
-    try:
-        data = json.loads(rules_path.read_text(encoding="utf-8"))
-        extends = {k: list(v) for k, v in (data.get("extends") or {}).items()}
-        path_kw = {k: list(v) for k, v in (data.get("path_keywords") or {}).items()}
-        return extends or _DEFAULT_EXTENDS_TAGS.copy(), path_kw or _DEFAULT_PATH_KEYWORDS.copy()
-    except (json.JSONDecodeError, OSError):
-        return _DEFAULT_EXTENDS_TAGS.copy(), _DEFAULT_PATH_KEYWORDS.copy()
+    """Return extends and path_keywords (defined above)."""
+    return EXTENDS_TAGS.copy(), PATH_KEYWORDS.copy()
 
 
 _MAX_DESCRIPTION_LEN = 200
@@ -829,7 +852,7 @@ def index_in_chromadb(
     # Ensure .env is loaded so OPENAI_ env vars are visible here as well.
     load_dotenv()
 
-    db_root = (Path(__file__).parent / ".." / ".." / ".." / "data" / "chroma_db").resolve()
+    db_root = (Path(__file__).resolve().parent.parent / "data" / "chroma_db").resolve()
     db_root.mkdir(parents=True, exist_ok=True)
 
     client = chromadb.PersistentClient(path=str(db_root))
@@ -1170,7 +1193,7 @@ def analyze_project(
 
 
 def main() -> None:
-    _base = Path(__file__).resolve().parent / ".." / ".." / ".."
+    _base = Path(__file__).resolve().parent.parent.parent
     default_scraped_root = (_base / "godot_knowledge_base" / "scraped_repos").resolve()
 
     parser = argparse.ArgumentParser(

@@ -27,11 +27,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Allow importing shared script_extends from scripts/common.
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-from common.script_extends import get_extends_from_content
+# Allow importing script_extends from same directory (scripts/).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+from script_extends import GODOT_NATIVE_EXTENDS, get_extends_from_content
 
 try:
     import requests
@@ -43,10 +43,65 @@ KEEP_EXTENSIONS = {".gd", ".cs", ".gdshader", ".tscn"}
 # Optional: also keep files named exactly project.godot.
 INCLUDE_PROJECT_FILENAME = "project.godot"
 
-# Default: script lives in rag_service/scripts/project-scraper/ -> repo root is ../../../ -> godot-llm
+# Script lives in rag_service/scripts/ -> RAG_SERVICE_ROOT = rag_service
 SCRIPT_DIR = Path(__file__).resolve().parent
-RAG_SERVICE_ROOT = SCRIPT_DIR.parent.parent
+RAG_SERVICE_ROOT = SCRIPT_DIR.parent
 DEFAULT_OUTPUT = RAG_SERVICE_ROOT.parent / "godot_knowledge_base" / "scraped_repos"
+
+
+def _prune_non_native_folders(scraped_dir: Path, dry_run: bool) -> tuple[list[str], int]:
+    """
+    Move files from non-native component folders into Other/.
+    Returns (list of folder names that were pruned, total files moved).
+    """
+    scraped_dir = scraped_dir.resolve()
+    if not scraped_dir.is_dir():
+        return [], 0
+    other_dir = scraped_dir / "Other"
+    pruned_folders: list[str] = []
+    total_moved = 0
+    for d in sorted(scraped_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        name = d.name
+        if name in ("Other", "ProjectConfig", "_repos"):
+            continue
+        if name in GODOT_NATIVE_EXTENDS:
+            continue
+        files_here = list(d.iterdir())
+        file_count = sum(1 for f in files_here if f.is_file())
+        if file_count == 0:
+            if not dry_run:
+                try:
+                    d.rmdir()
+                except OSError:
+                    pass
+            pruned_folders.append(name)
+            continue
+        if not dry_run:
+            other_dir.mkdir(parents=True, exist_ok=True)
+        for f in files_here:
+            if not f.is_file():
+                continue
+            dest_name = f"{name}__{f.name}"
+            dest = other_dir / dest_name
+            if dry_run:
+                total_moved += 1
+                continue
+            base, suffix = dest.stem, dest.suffix
+            n = 0
+            while dest.exists():
+                n += 1
+                dest = other_dir / f"{base}_{n}{suffix}"
+            shutil.move(str(f), str(dest))
+            total_moved += 1
+        if not dry_run:
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+        pruned_folders.append(name)
+    return pruned_folders, total_moved
 
 
 def _sanitize_repo_folder_name(owner: str, repo: str) -> str:
@@ -287,6 +342,11 @@ def main() -> int:
         action="store_true",
         help="Clean code/demos and index before analyzing (removes existing demo output)",
     )
+    ap.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="Do not move non-native component folders into Other/ after scraping",
+    )
     args = ap.parse_args()
 
     token = os.environ.get("GITHUB_TOKEN", "").strip() or None
@@ -338,9 +398,15 @@ def main() -> int:
 
     print(f"Done. {total_files} files in {args.output_dir}")
 
+    # Prune: move non-native component folders (e.g. custom classes) into Other/.
+    if not args.dry_run and not args.no_prune and total_files > 0:
+        pruned, moved = _prune_non_native_folders(args.output_dir, dry_run=False)
+        if pruned:
+            print(f"Pruned {len(pruned)} non-native folder(s) into Other/: {moved} files moved.")
+
     # Run analyze_project on component folders (one index per component).
     if not args.dry_run and not args.no_analyze and total_files > 0:
-        analyze_script = SCRIPT_DIR.parent / "project-parser" / "analyze_project.py"
+        analyze_script = SCRIPT_DIR / "analyze_project.py"
         if not analyze_script.exists():
             print("Warning: analyze_project.py not found, skipping analysis.", file=sys.stderr)
         else:

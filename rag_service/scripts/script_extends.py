@@ -21,7 +21,6 @@ GODOT_CSHARP_BASE_TYPES: Set[str] = {
 }
 
 # All Godot engine (native) extends: for filtering so we only bucket native types.
-# Includes C# set plus common GDScript/engine Control/Container/UI and Scene (for .tscn).
 GODOT_NATIVE_EXTENDS: Set[str] = GODOT_CSHARP_BASE_TYPES | {
     "AcceptDialog", "ConfirmationDialog", "FileDialog", "Window",
     "Container", "HBoxContainer", "VBoxContainer", "MarginContainer", "GridContainer",
@@ -29,8 +28,8 @@ GODOT_NATIVE_EXTENDS: Set[str] = GODOT_CSHARP_BASE_TYPES | {
     "ProgressBar", "CheckButton", "Button", "Label", "LineEdit", "TextEdit",
     "Tree", "ItemList", "PopupMenu", "MenuButton", "OptionButton",
     "SplitContainer", "HSplitContainer", "VSplitContainer", "ScrollContainer",
-    "Theme", "Reference",  # Reference = Godot 3 RefCounted alias
-    "Scene",  # bucket for .tscn
+    "Theme", "Reference",
+    "Scene",
 }
 
 _GDSCRIPT_EXTENDS_RE = re.compile(r'^\s*extends\s+([A-Za-z0-9_".]+)')
@@ -59,12 +58,6 @@ def _normalize_csharp_extends(base: str) -> str:
 def get_extends_from_content(content: str, path: str | Path) -> str:
     """
     Infer the component (extends class) from file content and path.
-    - .gd: first `extends TypeName` in first ~20 lines; default "Node" if missing.
-    - .cs: first `class Name : BaseType` in first ~50 lines; normalize Godot. prefix;
-      if base is not in GODOT_CSHARP_BASE_TYPES, return "Node" (bucket for non-Godot C#).
-    - .gdshader: return "Shader".
-    - .tscn: return "Scene".
-
     Returns a string suitable for folder names and index keys (e.g. CharacterBody2D, Node, Shader).
     """
     path = Path(path) if not isinstance(path, Path) else path
@@ -87,7 +80,7 @@ def get_extends_from_content(content: str, path: str | Path) -> str:
                 normalized = _normalize_csharp_extends(raw)
                 if normalized in GODOT_CSHARP_BASE_TYPES:
                     return normalized
-                return "Other"  # non-Godot C# go to Other
+                return "Other"
         return "Node"
 
     if suffix == ".gdshader":
