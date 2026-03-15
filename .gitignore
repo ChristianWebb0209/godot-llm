@@ -1,7 +1,9 @@
 # Ignore the full Godot engine source tree
+# this repo has the whole godot engine in it also for context, this isn't necessary for running, however.
 godot/
 
 # Ignore everything in godot_plugin except addons
+# I have set up a test project in this dir, but I don't want to commit it.
 godot_plugin/*
 !godot_plugin/addons/
 !godot_plugin/addons/**
@@ -21,5 +23,20 @@ Thumbs.db
 
 *.env
 godot_knowledge_base/
-chroma_db/
+rag_service/data/chroma_db/
 .venv/
+
+# ignore all pycache files also
+__pycache__/
+
+# Large or generated assets
+*.safetensors
+*.bin
+*.pt
+*.pth
+checkpoints/
+merged/
+
+# Colab / runtime
+colab/**/*.ipynb_checkpoints/
+.DS_Store
