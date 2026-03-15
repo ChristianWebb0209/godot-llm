@@ -3,8 +3,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..db import list_edit_events
 from ..rag_core import SourceChunk, _collect_top_docs, _collect_code_results, _collect_code_by_extends
-from .asset_library import search_asset_library
-from .context import (
+from ..services.asset_library import search_asset_library
+from ..services.context import (
     format_component_scripts_block,
     grep_project_files,
     read_project_godot_ini,

@@ -26,7 +26,9 @@ from .services.repo_indexing import (
     get_repo_index_stats,
     list_indexed_paths,
 )
-from .services.tools import (
+from .services.agent_deps import GodotQueryDeps
+from .services.godot_agent import create_godot_agent
+from .tools import (
     dispatch_tool_call,
     get_openai_tools_payload,
     get_registered_tools,
@@ -68,6 +70,11 @@ from .services.context import (
     write_project_file,
 )
 from .services.context.viewer import build_context_view
+from .services.context.openviking_context import (
+    add_turn_and_commit as openviking_add_turn_and_commit,
+    ensure_openviking_data_dir,
+    find_memories as openviking_find_memories,
+)
 from .services.console_service import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
 
 
@@ -109,6 +116,7 @@ async def lifespan(app: FastAPI):
         log = logging.getLogger(name) if name else logging.root
         log.addFilter(_SuppressCancelledErrorFilter())
     try:
+        ensure_openviking_data_dir()
         yield
     except asyncio.CancelledError:
         pass
@@ -257,6 +265,71 @@ class ToolCallResult(BaseModel):
 class QueryResponseWithTools(QueryResponse):
     # Optional structured record of any tools the model asked us to run.
     tool_calls: List[ToolCallResult] = []
+
+
+def _parse_composer_response(content: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Parse Godot Composer (fine-tuned) model output. Expects optional text plus an optional
+    JSON array of tool_calls at the end: [{"name": "...", "arguments": {...}}, ...].
+    Returns (answer_text, list of {"name", "arguments"} dicts).
+    """
+    content = (content or "").strip()
+    if not content:
+        return "", []
+
+    # Find the last line or block that looks like a JSON array of tool calls.
+    tool_calls: List[Dict[str, Any]] = []
+    answer = content
+    # Try to find a JSON array in the content (often at the end after a newline).
+    for start in range(len(content) - 1, -1, -1):
+        if content[start] != "[":
+            continue
+        try:
+            parsed = json.loads(content[start:])
+            if isinstance(parsed, list) and len(parsed) > 0:
+                if all(
+                    isinstance(t, dict) and "name" in t and isinstance(t.get("arguments"), (dict, type(None)))
+                    for t in parsed
+                ):
+                    tool_calls = [
+                        {"name": str(t["name"]), "arguments": t.get("arguments") or {}}
+                        for t in parsed
+                    ]
+                    answer = content[:start].strip()
+                    break
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return answer, tool_calls
+
+
+def _extract_tool_calls_from_pydantic_result(result: Any) -> List[ToolCallResult]:
+    """
+    Build List[ToolCallResult] from a Pydantic AI run result by walking all_messages()
+    and pairing ToolCallPart with ToolReturnPart in order.
+    """
+    out: List[ToolCallResult] = []
+    try:
+        messages = result.all_messages()
+    except Exception:
+        return out
+    call_parts: List[Tuple[str, Dict[str, Any]]] = []  # (tool_name, args)
+    return_contents: List[Any] = []  # output per tool
+    for msg in messages:
+        parts = getattr(msg, "parts", [])
+        for part in parts:
+            pname = type(part).__name__
+            if pname == "ToolCallPart":
+                name = getattr(part, "tool_name", None)
+                args = getattr(part, "args", None)
+                if name is not None:
+                    call_parts.append((str(name), args if isinstance(args, dict) else {}))
+            elif pname == "ToolReturnPart":
+                content = getattr(part, "content", None)
+                return_contents.append(content)
+    for i, (name, args) in enumerate(call_parts):
+        output = return_contents[i] if i < len(return_contents) else None
+        out.append(ToolCallResult(tool_name=name, arguments=args, output=output))
+    return out
 
 
 # Path keywords -> Chroma component_type values (must match analyze_project indexing).
@@ -484,45 +557,7 @@ def _run_query_with_tools(
     is_obscure = len(code_snippets) < max(1, top_k // 3)
 
     # --- Context builder (Stage 2): ordered blocks + budgets ---
-    system_prompt = (
-        "You are in AGENT MODE. You MUST use editor tools to fix, edit, or create files—do not only describe changes or suggest code for the user to copy. "
-        "When the user asks to fix a file (e.g. 'fix enemy.gd', 'fix lint errors', 'fix the errors'), call read_file(path) to get the current contents, then use apply_patch(path, old_string, new_string) or write_file(path, content) to apply the fix. "
-        "Never respond with only a description of the fix; always call the tools so the changes are applied in the user's Godot editor.\n\n"
-        "You are a Godot 4.x development assistant. "
-        "You have access to:\n"
-        "- Retrieved documentation (the 'docs' collection, scraped from the official Godot manuals).\n"
-        "- Retrieved example project code snippets (the 'project_code' collection, non-canonical examples).\n"
-        "- Search tools: 'search_docs' and 'search_project_code' to refine your search. "
-        "If you need full script examples for specific node types (e.g. CharacterBody2D, Control), call 'request_component_context' with those component names.\n"
-        "- Editor tools (executed in the user's Godot editor). Use these first when the user asks to fix or edit a file:\n"
-        "  - read_file(path): Call this to read the current contents of any project file (e.g. res://player.gd, res://scripts/enemy.gd). "
-        "You WILL receive the full file content in the tool result. Always call read_file when asked to fix or edit a file; do not guess or assume.\n"
-        "  - apply_patch(path, old_string, new_string): small targeted edits. Use for fixes: pass the exact old_string to replace and the new_string. Prefer over write_file for edits to existing files.\n"
-        "  - write_file(path, content): overwrite file with full content. Use when apply_patch is not suitable (large replacements).\n"
-        "  - create_file(path, content?): create an empty file at path; content is optional. Then use write_file to add content.\n"
-        "  - create_script(path, extends_class, initial_content, template?): create a GDScript or C# script; use template (e.g. character_2d) for boilerplate.\n"
-        "  - delete_file(path): delete a project file.\n"
-        "  - list_directory(path, recursive, max_entries): list entries (files and dirs) in a folder.\n"
-        "  - list_files(path, recursive, extensions, max_entries): list only file paths, optionally filtered by extension.\n"
-        "  - search_files(query, root_path, extensions): grep—find files whose content contains the query text.\n"
-        "  - project_structure(prefix, max_paths, max_depth): list indexed project file paths under a prefix.\n"
-        "  - find_scripts_by_extends(extends_class): find scripts that extend a class (e.g. CharacterBody2D).\n"
-        "  - find_references_to(res_path): find files that reference a given path.\n"
-        "  - read_import_options(path): read the .import file for a resource.\n"
-        "  - modify_attribute(target_type, attribute, value, ...): set an attribute on a target (node or import).\n"
-        "  - create_node(scene_path, parent_path, node_type, node_name): add a node to a scene. Omit scene_path (or use 'current') for the current open scene.\n"
-        "  - To attach a script to a node: create_script(path, extends_class, initial_content), then modify_attribute(target_type='node', scene_path=..., node_path=..., attribute='script', value='res://path/to/script.gd').\n\n"
-        "Tool usage rules:\n"
-        "- For NEW files: use create_script (with template when applicable) or create_file(path) then write_file(path, content). For EXISTING files: use apply_patch(path, old_string, new_string) for small edits; use write_file only for large replacements. You will receive the written content in the tool result; do not call read_file to verify.\n"
-        "- When the user asks you to create or change something in the scene (nodes, player, scripts, attributes), USE the editor tools—call create_node, create_script, modify_attribute—so the changes happen in the editor. Do NOT only provide code for the user to run manually.\n"
-        "- Match 2D vs 3D: the context will say whether the current scene is 2D or 3D. Use only node types that match (e.g. CharacterBody2D in 2D, CharacterBody3D in 3D).\n"
-        "- To see what is in a file, call read_file(path). For new files (context may say 'file does not exist'), do not read_file; create with create_script or create_file then write_file.\n"
-        "- When the user asks to fix, edit, or lint a specific file by name (e.g. 'fix lint in enemy.gd', 'fix enemy.gd'), you MUST call read_file(res://path) for that file to get its current contents before answering—never assume a file is empty from context. If the path is unclear, use search_files(query, root_path, ['.gd']) or list_files to find it, then read_file.\n"
-        "- Use search_docs / search_project_code when you need more documentation or code examples. "
-        "If context is missing for a component type, or the user asks for more examples, call request_component_context(components=[...]) to get full script examples.\n"
-        "- For new files, create_file(path) may have empty content; then write_file(path, content). Never leave a user-visible file as placeholder; use write_file or append_to_file to add the real content.\n"
-        "When you are satisfied, return a final answer to the user."
-    )
+    # (Agent system instructions live in godot_agent.GODOT_AGENT_SYSTEM_PROMPT.)
 
     # Extract active file info from request context (sent by the Godot editor).
     active_file_path = None
@@ -552,9 +587,12 @@ def _run_query_with_tools(
             else []
         )
     else:
+        extra = {}
         project_root_abs = None
         engine_version = None
         exclude_block_keys = []
+
+    chat_id: Optional[str] = (extra or {}).get("chat_id") if isinstance((extra or {}).get("chat_id"), str) else None
 
     # If plugin didn't send file text (or it's empty), read from disk.
     if project_root_abs and active_file_path and (not active_file_text or len(active_file_text) < 5):
@@ -870,6 +908,18 @@ def _run_query_with_tools(
             pass
     component_scripts_text = "\n".join(component_scripts_parts) if component_scripts_parts else None
 
+    # OpenViking: retrieve session memories for this chat (when chat_id present).
+    retrieved_memories: List[str] = []
+    if chat_id:
+        try:
+            mems = openviking_find_memories(chat_id, question, top_k=5)
+            for m in mems:
+                text = (m.get("overview") or m.get("content") or m.get("abstract") or "").strip()
+                if text:
+                    retrieved_memories.append(text)
+        except Exception:
+            pass
+
     blocks = build_ordered_blocks(
         model=model,
         system_instructions=system_prompt,
@@ -887,6 +937,7 @@ def _run_query_with_tools(
         current_scene_scripts=current_scene_scripts if current_scene_scripts else None,
         component_scripts_text=component_scripts_text,
         exclude_block_keys=exclude_block_keys,
+        retrieved_memories=retrieved_memories if retrieved_memories else None,
     )
     limit = get_context_limit(model)
     # When context fills over 50%, drop lowest-priority blocks first (component_scripts, extras).
@@ -916,445 +967,48 @@ def _run_query_with_tools(
         "If the existing context is enough, answer directly.\n"
     )
 
-    messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_content},
-    ]
-
-    tools_payload = get_openai_tools_payload()
-
-    tool_call_results: List[ToolCallResult] = []
-    total_prompt_tokens = 0
-    total_completion_tokens = 0
-    read_file_cache: Dict[str, str] = {}  # path -> content, per request
-
-    for _ in range(max_tool_rounds):
-        # Basic Stage-1 context budgeting: conservatively trim the user message content
-        # so we never explode prompt size. (Compression/summarization comes later.)
-        limit = get_context_limit(model)
-        # Reserve space for the model's answer + tool chatter.
-        budget_for_input = max(2048, limit - 4096)
-        if messages and isinstance(messages[-1], dict) and "content" in messages[-1]:
-            content = str(messages[-1].get("content") or "")
-            if content:
-                # Only trim if we are far over budget; this is a stub.
-                # We use a cheap estimator; later we will rank+select context candidates.
-                est = build_context_usage(
-                    model,
-                    [m.get("content", "") for m in messages if isinstance(m, dict)],
-                ).estimated_prompt_tokens
-                if est > budget_for_input:
-                    messages[-1]["content"] = trim_text_to_tokens(content, max(1, budget_for_input - 512))
-
-        # Debug: log the exact payload sent to the LLM.
-        _log_llm_input(model=model, context="query_with_tools", input_payload=messages)
-
-        response = client.responses.create(
-            model=model,
-            input=messages,
-            tools=tools_payload,
-        )
-
-        # Accumulate usage if provided by the Responses API.
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            # The Responses API may expose input/output or prompt/completion tokens;
-            # try both naming schemes.
-            prompt_tokens = (
-                getattr(usage, "input_tokens", None)
-                or getattr(usage, "prompt_tokens", None)
-                or 0
-            )
-            completion_tokens = (
-                getattr(usage, "output_tokens", None)
-                or getattr(usage, "completion_tokens", None)
-                or 0
-            )
-            total_prompt_tokens += int(prompt_tokens)
-            total_completion_tokens += int(completion_tokens)
-
-        # The Responses API may emit multiple output items (message + tool calls).
-        outputs = getattr(response, "output", None) or []
-
-        # Collect any tool calls in this turn across all output items.
-        # Keep call_id so we can send function_call_output back to the Responses API.
-        # Keep the raw tool-call item from the model so call_id matches exactly.
-        parsed_tool_calls: List[Tuple[str, str, Dict[str, Any], Dict[str, Any]]] = []
-        for out in outputs:
-            out_type = getattr(out, "type", None) or (out.get("type") if isinstance(out, dict) else None)
-            # Common shape: {type:"function_call", name:"...", arguments:"{...}"}
-            if out_type in ("function_call", "tool_call"):
-                name = getattr(out, "name", None) or (out.get("name") if isinstance(out, dict) else None)
-                call_id = getattr(out, "call_id", None) or getattr(out, "id", None) or (out.get("call_id") if isinstance(out, dict) else None) or (out.get("id") if isinstance(out, dict) else None)
-                args_raw = getattr(out, "arguments", None) or (out.get("arguments") if isinstance(out, dict) else None) or "{}"
-                if name and call_id:
-                    try:
-                        args_dict = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-                    except Exception:
-                        args_dict = {}
-                    if isinstance(out, dict):
-                        call_item = out
-                    else:
-                        # Best-effort: preserve everything the SDK exposes.
-                        try:
-                            call_item = out.model_dump()  # type: ignore[attr-defined]
-                        except Exception:
-                            call_item = {
-                                "type": "function_call",
-                                "call_id": str(call_id),
-                                "name": str(name),
-                                "arguments": args_raw if isinstance(args_raw, str) else json.dumps(args_raw or {}),
-                            }
-                    parsed_tool_calls.append((str(name), str(call_id), args_dict, call_item))
-                continue
-
-            # Older/alternate client shape: output.tool_calls = [{type:"function", function:{name, arguments}}]
-            tool_calls = getattr(out, "tool_calls", None) or []
-            for tc in tool_calls:
-                tc_type = getattr(tc, "type", None) or (tc.get("type") if isinstance(tc, dict) else None)
-                if tc_type != "function":
-                    continue
-                fn = getattr(tc, "function", None) or (tc.get("function") if isinstance(tc, dict) else None) or {}
-                name = getattr(fn, "name", None) or (fn.get("name") if isinstance(fn, dict) else None)
-                args_raw = getattr(fn, "arguments", None) or (fn.get("arguments") if isinstance(fn, dict) else None) or "{}"
-                # Some SDK versions include a tool_call id; fall back to a stable placeholder if missing.
-                call_id = getattr(tc, "id", None) or (tc.get("id") if isinstance(tc, dict) else None) or f"{name}_call"
-                if name and call_id:
-                    try:
-                        args_dict = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
-                    except Exception:
-                        args_dict = {}
-                    # We don't have the original Responses output item here; still provide a compatible item.
-                    call_item = {
-                        "type": "function_call",
-                        "call_id": str(call_id),
-                        "name": str(name),
-                        "arguments": args_raw if isinstance(args_raw, str) else json.dumps(args_raw or {}),
-                    }
-                    parsed_tool_calls.append((str(name), str(call_id), args_dict, call_item))
-
-        if parsed_tool_calls:
-            for name, call_id, args_dict, call_item in parsed_tool_calls:
-                # When we have project_root_abs (plugin sent it), run read_file / list_files /
-                # read_import_options on the backend so the LLM receives the result. Otherwise
-                # return execute_on_client payload for the plugin to run.
-                if name == "read_file" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if path:
-                        cache_key = (path if path.startswith("res://") else "res://" + path.lstrip("/")).replace("\\", "/")
-                        if cache_key in read_file_cache:
-                            content = read_file_cache[cache_key]
-                            tool_output = {
-                                "success": True,
-                                "path": path,
-                                "content": content,
-                                "message": "Read (cached): %s (%d chars)" % (path, len(content)),
-                            }
-                        else:
-                            content = read_project_file(project_root_abs, path)
-                            content_str = content or ""
-                            read_file_cache[cache_key] = content_str
-                            tool_output = {
-                                "success": True,
-                                "path": path,
-                                "content": content_str,
-                                "message": "Read: %s (%d chars)" % (path, len(content_str)),
-                            }
-                    else:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                elif name == "list_files" and project_root_abs:
-                    path = (args_dict.get("path") or "res://").strip() or "res://"
-                    recursive = bool(args_dict.get("recursive", True))
-                    extensions = args_dict.get("extensions") or []
-                    max_entries = min(2000, max(1, int(args_dict.get("max_entries", 500))))
-                    paths = list_project_files(
-                        project_root_abs, path, recursive=recursive,
-                        extensions=extensions, max_entries=max_entries,
-                    )
-                    tool_output = {
-                        "success": True,
-                        "message": "Listed %d file(s) under %s" % (len(paths), path),
-                        "path": path,
-                        "paths": paths,
-                    }
-                elif name == "read_import_options" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if path:
-                        import_path = path if path.endswith(".import") else path + ".import"
-                        content = read_project_file(project_root_abs, import_path)
-                        tool_output = {
-                            "success": content is not None,
-                            "message": "Read import options for %s" % path if content is not None else "No .import file found for: %s" % path,
-                            "path": path,
-                            "import_path": import_path,
-                            "content": content or "",
-                        }
-                    else:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                elif name == "list_directory" and project_root_abs:
-                    path = (args_dict.get("path") or "res://").strip() or "res://"
-                    recursive = bool(args_dict.get("recursive", False))
-                    max_entries = min(2000, max(1, int(args_dict.get("max_entries", 250))))
-                    max_depth = min(20, max(0, int(args_dict.get("max_depth", 6))))
-                    entries = list_project_directory(
-                        project_root_abs, path, recursive=recursive,
-                        max_entries=max_entries, max_depth=max_depth,
-                    )
-                    tool_output = {
-                        "success": True,
-                        "message": "Listed %d entry/entries under %s" % (len(entries), path),
-                        "path": path,
-                        "entries": entries,
-                    }
-                elif name == "search_files" and project_root_abs:
-                    query = (args_dict.get("query") or "").strip()
-                    if not query:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        root_path = (args_dict.get("root_path") or "res://").strip() or "res://"
-                        extensions = args_dict.get("extensions") or []
-                        max_matches = min(500, max(1, int(args_dict.get("max_matches", 50))))
-                        results = search_project_files(
-                            project_root_abs, query, root_path=root_path,
-                            extensions=extensions, max_matches=max_matches,
-                        )
-                        tool_output = {
-                            "success": True,
-                            "message": "Found %d file(s) containing %r" % (len(results), query),
-                            "query": query,
-                            "results": results,
-                        }
-                elif name == "project_structure" and project_root_abs:
-                    prefix = (args_dict.get("prefix") or "res://").strip() or "res://"
-                    max_paths = min(1000, max(1, int(args_dict.get("max_paths", 300))))
-                    max_depth_arg = args_dict.get("max_depth")
-                    max_depth = int(max_depth_arg) if max_depth_arg is not None else None
-                    if max_depth is not None:
-                        max_depth = min(10, max(1, max_depth))
-                    paths = list_indexed_paths(
-                        project_root_abs, prefix=prefix, max_paths=max_paths, max_depth=max_depth
-                    )
-                    tool_output = {
-                        "success": True,
-                        "message": "Listed %d path(s) under %s" % (len(paths), prefix),
-                        "prefix": prefix,
-                        "paths": paths,
-                    }
-                elif name == "find_scripts_by_extends" and project_root_abs:
-                    extends_class = (args_dict.get("extends_class") or "").strip()
-                    if not extends_class:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        query = "extends " + extends_class
-                        results = search_project_files(
-                            project_root_abs, query, root_path="res://",
-                            extensions=[".gd", ".cs"], max_matches=30,
-                        )
-                        paths = [r["path"] for r in results]
-                        tool_output = {
-                            "success": True,
-                            "message": "Found %d script(s) extending %s" % (len(paths), extends_class),
-                            "extends_class": extends_class,
-                            "paths": paths,
-                        }
-                elif name == "find_references_to" and project_root_abs:
-                    res_path = (args_dict.get("res_path") or "").strip()
-                    if not res_path:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        refs = get_inbound_refs(project_root_abs, res_path, limit=20)
-                        tool_output = {
-                            "success": True,
-                            "message": "Found %d file(s) referencing %s" % (len(refs), res_path),
-                            "res_path": res_path,
-                            "references": refs,
-                        }
-                elif name == "grep_search" and project_root_abs:
-                    pattern = str(args_dict.get("pattern") or args_dict.get("query") or "").strip()
-                    if not pattern:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        root_path = (args_dict.get("root_path") or "res://").strip() or "res://"
-                        extensions = args_dict.get("extensions") or []
-                        max_matches = min(500, max(1, int(args_dict.get("max_matches", 100))))
-                        use_regex = bool(args_dict.get("use_regex", True))
-                        matches = grep_project_files(
-                            project_root_abs,
-                            pattern,
-                            root_path=root_path,
-                            extensions=extensions,
-                            max_matches=max_matches,
-                            use_regex=use_regex,
-                        )
-                        tool_output = {
-                            "success": True,
-                            "message": "Found %d match(es)." % len(matches),
-                            "pattern": pattern,
-                            "matches": matches,
-                        }
-                elif name == "get_project_settings" and project_root_abs:
-                    ini = read_project_godot_ini(project_root_abs)
-                    tool_output = {
-                        "success": True,
-                        "message": "Project settings (project.godot sections).",
-                        "sections": {k: v for k, v in ini.items()},
-                    }
-                elif name == "get_autoloads" and project_root_abs:
-                    ini = read_project_godot_ini(project_root_abs)
-                    autoload = ini.get("autoload", {})
-                    items = [{"name": k, "path": v} for k, v in autoload.items()]
-                    tool_output = {
-                        "success": True,
-                        "message": "Autoloads from project.godot.",
-                        "autoloads": items,
-                    }
-                elif name == "get_input_map" and project_root_abs:
-                    ini = read_project_godot_ini(project_root_abs)
-                    inp = ini.get("input", {})
-                    items = [{"action": k, "events": v} for k, v in inp.items()]
-                    tool_output = {
-                        "success": True,
-                        "message": "Input map from project.godot.",
-                        "input_map": items,
-                    }
-                elif name == "create_file" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if not path:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        content = args_dict.get("content", "") or ""
-                        overwrite = bool(args_dict.get("overwrite", False))
-                        tool_output = write_project_file(
-                            project_root_abs, path, content, overwrite=overwrite
-                        )
-                elif name == "write_file" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if not path:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        content = args_dict.get("content", "") or ""
-                        tool_output = write_project_file(
-                            project_root_abs, path, content, overwrite=True
-                        )
-                elif name == "apply_patch" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if not path:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        diff_text = (args_dict.get("diff") or "").strip()
-                        if diff_text:
-                            tool_output = apply_project_patch_unified(
-                                project_root_abs, path, diff_text
-                            )
-                        else:
-                            old_string = args_dict.get("old_string", "") or ""
-                            new_string = args_dict.get("new_string", "") or ""
-                            tool_output = apply_project_patch(
-                                project_root_abs, path, old_string, new_string
-                            )
-                elif name == "append_to_file" and project_root_abs:
-                    path = (args_dict.get("path") or "").strip()
-                    if not path:
-                        tool_output = dispatch_tool_call(name, args_dict)
-                    else:
-                        content = args_dict.get("content", "") or ""
-                        tool_output = append_project_file(project_root_abs, path, content)
-                elif name == "create_node":
-                    # Default to current open scene so nodes are always attached; LLM often omits scene_path.
-                    sp = (args_dict.get("scene_path") or "").strip()
-                    if not sp or sp.lower() == "current":
-                        args_dict = {**args_dict, "scene_path": active_scene_path or "current"}
-                    tool_output = dispatch_tool_call(name, args_dict)
-                else:
-                    tool_output = dispatch_tool_call(name, args_dict)
-                tool_call_results.append(
-                    ToolCallResult(tool_name=name, arguments=args_dict, output=tool_output)
-                )
-
-                # Feed tool result back to the Responses API.
-                # See: function_call_output items.
-                messages.append(call_item)
-                messages.append(
-                    {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps(tool_output),
-                    }
-                )
-            continue
-
-        # No tool calls → expect final natural-language answer.
-        # Prefer response.output_text if available; otherwise parse message content.
-        answer = getattr(response, "output_text", None) or ""
-        if not answer:
-            for out in outputs:
-                out_type = getattr(out, "type", None) or (out.get("type") if isinstance(out, dict) else None)
-                if out_type != "message":
-                    continue
-                msg = getattr(out, "message", None) or (out.get("message") if isinstance(out, dict) else None) or {}
-                final_content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
-                if isinstance(final_content, list):
-                    text_parts = [
-                        part.get("text", "") if isinstance(part, dict) else str(part)
-                        for part in final_content
-                    ]
-                    answer = "".join(text_parts)
-                else:
-                    answer = str(final_content or "")
-                break
-
-        if answer:
-            snippets = docs + code_snippets
-            usage_obj = build_context_usage(
-                model,
-                [m.get("content", "") for m in messages if isinstance(m, dict) and "content" in m],
-            )
-            if total_prompt_tokens or total_completion_tokens:
-                _log_usage_and_cost(
-                    model=model,
-                    prompt_tokens=total_prompt_tokens,
-                    completion_tokens=total_completion_tokens,
-                    context="query_with_tools",
-                )
-                record_usage(model, total_prompt_tokens, total_completion_tokens)
-            # attach estimated usage (UI uses this)
-            usage_obj = build_context_usage(
-                model,
-                [m.get("content", "") for m in messages if isinstance(m, dict) and "content" in m],
-            )
-            return answer, snippets, tool_call_results, {
-                "model": usage_obj.model,
-                "limit_tokens": usage_obj.limit_tokens,
-                "estimated_prompt_tokens": usage_obj.estimated_prompt_tokens,
-                "percent": usage_obj.percent,
-                "context_view": context_view_for_response,
-                "context_decision_log": context_decision_log,
-            }
-
-        # Fallback: no tool calls and no message; break.
-        break
-
-    # If we exit the loop without a clean final answer, fall back to the
-    # existing RAG-only answer builder.
-    fallback_answer = _call_llm_with_rag(
-        question=question,
-        context_language=context_language,
-        docs=docs,
-        code_snippets=code_snippets,
-        is_obscure=is_obscure,
-        client=client,
-        model=model,
+    # Pydantic AI agent: single run with tools; tool execution via execute_tool (tool_runner).
+    read_file_cache: Dict[str, str] = {}
+    deps = GodotQueryDeps(
+        project_root_abs=project_root_abs,
+        active_scene_path=active_scene_path,
+        active_file_path=active_file_path,
+        extra=(request_context.extra or {}) if request_context else {},
+        read_file_cache=read_file_cache,
     )
-    if total_prompt_tokens or total_completion_tokens:
-        _log_usage_and_cost(
-            model=model,
-            prompt_tokens=total_prompt_tokens,
-            completion_tokens=total_completion_tokens,
-            context="query_with_tools_fallback",
-        )
-        record_usage(model, total_prompt_tokens, total_completion_tokens)
-    usage_obj = build_context_usage(model, [question])
-    return fallback_answer, docs + code_snippets, tool_call_results, {
+    agent = create_godot_agent(model=model_override or model)
+    result = agent.run_sync(user_content, deps=deps)
+    tool_call_results = _extract_tool_calls_from_pydantic_result(result)
+    answer = (result.output or "").strip()
+    usage_obj = build_context_usage(
+        model,
+        [user_content],
+    )
+    run_usage = getattr(result, "usage", None)
+    if run_usage is not None:
+        total_prompt_tokens = getattr(run_usage, "input_tokens", None) or getattr(run_usage, "prompt_tokens", 0) or 0
+        total_completion_tokens = getattr(run_usage, "output_tokens", None) or getattr(run_usage, "completion_tokens", 0) or 0
+        if total_prompt_tokens or total_completion_tokens:
+            _log_usage_and_cost(
+                model=model,
+                prompt_tokens=int(total_prompt_tokens),
+                completion_tokens=int(total_completion_tokens),
+                context="query_with_tools",
+            )
+            record_usage(model, int(total_prompt_tokens), int(total_completion_tokens))
+    # OpenViking: commit this turn for memory extraction (fire-and-forget).
+    if chat_id and answer:
+        try:
+            openviking_add_turn_and_commit(
+                chat_id,
+                [
+                    {"role": "user", "content": question},
+                    {"role": "assistant", "content": answer},
+                ],
+            )
+        except Exception:
+            pass
+    return answer, docs + code_snippets, tool_call_results, {
         "model": usage_obj.model,
         "limit_tokens": usage_obj.limit_tokens,
         "estimated_prompt_tokens": usage_obj.estimated_prompt_tokens,
@@ -1364,12 +1018,127 @@ def _run_query_with_tools(
     }
 
 
+def _run_composer_query(
+    question: str,
+    context_language: Optional[str],
+    request_context: Optional["QueryContext"],
+    api_key: Optional[str] = None,
+    base_url: Optional[str] = None,
+    model_override: Optional[str] = None,
+) -> Tuple[str, List[SourceChunk], List[ToolCallResult], Dict[str, Any]]:
+    """
+    Godot Composer: single-turn call to a fine-tuned model that outputs tool_calls
+    directly (no RAG, no tool loop). Uses same payload as /query; returns same shape.
+    Model response is parsed for a JSON array of {name, arguments} at the end of content.
+    """
+    client, model = _openai_client_and_model(
+        api_key=api_key, base_url=base_url, model=model_override
+    )
+    if client is None:
+        return (
+            "No Composer model configured. Set API key and model (e.g. godot-composer) in settings.",
+            [],
+            [],
+            {"model": "", "limit_tokens": 0, "estimated_prompt_tokens": 0, "percent": 0.0},
+        )
+
+    extra = (request_context.extra or {}) if request_context else {}
+    system_prompt = (
+        "You are a Godot assistant. Use the available tools when needed. "
+        "When you need to perform an action, respond with optional text and a JSON array of tool calls on one line: "
+        '[{"name": "tool_name", "arguments": {...}}, ...]. Use res:// paths for Godot project files.'
+    )
+    user_parts: List[str] = [question]
+    if extra.get("active_file_text"):
+        user_parts.append("Current file content:\n" + str(extra["active_file_text"]))
+    if extra.get("scene_tree"):
+        user_parts.append("Scene tree:\n" + str(extra["scene_tree"]))
+    if extra.get("lint_output"):
+        user_parts.append("Lint output:\n" + str(extra["lint_output"]))
+    if extra.get("active_scene_path"):
+        user_parts.append("Current scene: " + str(extra["active_scene_path"]))
+    if extra.get("scene_dimension"):
+        user_parts.append("Scene type: " + str(extra["scene_dimension"]))
+    if request_context and request_context.current_script:
+        user_parts.append("Active script: " + str(request_context.current_script))
+    conv = extra.get("conversation_history")
+    if conv and isinstance(conv, list) and len(conv) > 0:
+        conv_lines = []
+        for m in conv[-6:]:
+            if isinstance(m, dict):
+                r = m.get("role", "")
+                c = m.get("content", "")
+                if r and c is not None:
+                    conv_lines.append(f"{r}: {str(c)[:500]}")
+        if conv_lines:
+            user_parts.append("Recent conversation:\n" + "\n".join(conv_lines))
+    user_content = "\n\n".join(user_parts)
+
+    messages: List[Dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_content},
+    ]
+    _log_llm_input(model=model, context="composer", input_payload=messages)
+    try:
+        completion = client.chat.completions.create(model=model, messages=messages)
+    except Exception as e:
+        return (
+            "Composer request failed: " + str(e),
+            [],
+            [],
+            {"model": model, "limit_tokens": 0, "estimated_prompt_tokens": 0, "percent": 0.0},
+        )
+    content = (completion.choices[0].message.content or "").strip()
+    usage = getattr(completion, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None) or 0
+    completion_tokens = getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None) or 0
+    if usage:
+        record_usage(model, int(prompt_tokens), int(completion_tokens))
+    answer, raw_tool_calls = _parse_composer_response(content)
+    tool_results: List[ToolCallResult] = [
+        ToolCallResult(tool_name=tc["name"], arguments=tc.get("arguments") or {}, output=None)
+        for tc in raw_tool_calls
+    ]
+    limit = get_context_limit(model)
+    context_usage = {
+        "model": model,
+        "limit_tokens": limit,
+        "estimated_prompt_tokens": int(prompt_tokens),
+        "percent": (int(prompt_tokens) + int(completion_tokens)) / limit if limit else 0.0,
+    }
+    return answer, [], tool_results, context_usage
+
+
 @app.get("/health")
 async def health() -> Dict[str, str]:
     """
     Simple health check so the Godot plugin can verify connectivity.
     """
     return {"status": "ok"}
+
+
+@app.get("/test/backends")
+async def test_backends() -> Dict[str, Any]:
+    """
+    Return backend identifiers, endpoints, and default models for testing and UI.
+    Use this to switch between RAG (GPT-4.1-mini) and Godot Composer easily.
+    """
+    default_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    composer_model = os.getenv("COMPOSER_MODEL") or default_model
+    return {
+        "rag": {
+            "endpoint": "/query",
+            "stream_endpoint": "/query_stream_with_tools",
+            "default_model": default_model,
+            "description": "RAG + tool loop (e.g. gpt-4.1-mini)",
+        },
+        "composer": {
+            "endpoint": "/composer/query",
+            "stream_endpoint": "/composer/query_stream_with_tools",
+            "default_model": composer_model,
+            "description": "Godot Composer fine-tuned model, tool_calls in response",
+        },
+    }
 
 
 class IndexStatusResponse(BaseModel):
@@ -1737,6 +1506,102 @@ async def query_stream_with_tools(payload: QueryRequest, request: Request):
         payload_list = [tc.model_dump() for tc in tool_calls]
         yield _STREAM_TOOL_CALLS_PREFIX + json.dumps(payload_list) + "\n"
         yield "\n__USAGE__\n" + json.dumps(context_usage) + "\n"
+
+    return StreamingResponse(
+        stream_iter(), media_type="text/plain; charset=utf-8"
+    )
+
+
+# --- Godot Composer (fine-tuned model, tool_calls directly) ---
+
+
+@app.post("/composer/query", response_model=QueryResponseWithTools)
+async def composer_query(payload: QueryRequest, request: Request) -> QueryResponseWithTools:
+    """
+    Godot Composer: single-turn call to a fine-tuned model that outputs tool_calls
+    directly. Same request/response shape as /query so the plugin can switch by backend profile.
+    """
+    client_host = request.client.host if request.client else "unknown"
+    _log_rag_request("POST /composer/query", client_host, payload.question or "", _green)
+    question = payload.question.strip()
+    context_language = payload.context.language if payload.context else None
+    answer, snippets, tool_calls, context_usage = _run_composer_query(
+        question=question,
+        context_language=context_language,
+        request_context=payload.context,
+        api_key=payload.api_key,
+        base_url=payload.base_url,
+        model_override=payload.model,
+    )
+    return QueryResponseWithTools(
+        answer=answer,
+        snippets=snippets,
+        tool_calls=tool_calls,
+        context_usage=context_usage,
+    )
+
+
+@app.post("/composer/query_stream_with_tools")
+async def composer_query_stream_with_tools(payload: QueryRequest, request: Request):
+    """
+    Same as /composer/query but streams answer text then __TOOL_CALLS__ + JSON.
+    """
+    client_host = request.client.host if request.client else "unknown"
+    _log_rag_request("POST /composer/query_stream_with_tools", client_host, payload.question or "", _green)
+    question = payload.question.strip()
+    context_language = payload.context.language if payload.context else None
+
+    def run():
+        return _run_composer_query(
+            question=question,
+            context_language=context_language,
+            request_context=payload.context,
+            api_key=payload.api_key,
+            base_url=payload.base_url,
+            model_override=payload.model,
+        )
+
+    answer, snippets, tool_calls, context_usage = await asyncio.to_thread(run)
+
+    def stream_iter():
+        chunk_size = 80
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i : i + chunk_size]
+        payload_list = [tc.model_dump() for tc in tool_calls]
+        yield _STREAM_TOOL_CALLS_PREFIX + json.dumps(payload_list) + "\n"
+        yield "\n__USAGE__\n" + json.dumps(context_usage) + "\n"
+
+    return StreamingResponse(
+        stream_iter(), media_type="text/plain; charset=utf-8"
+    )
+
+
+@app.post("/composer/query_stream")
+async def composer_query_stream(payload: QueryRequest, request: Request):
+    """
+    Composer streaming (answer text only, no tool_calls suffix).
+    """
+    client_host = request.client.host if request.client else "unknown"
+    _log_rag_request("POST /composer/query_stream", client_host, payload.question or "", _dim)
+    question = payload.question.strip()
+    context_language = payload.context.language if payload.context else None
+
+    def run():
+        return _run_composer_query(
+            question=question,
+            context_language=context_language,
+            request_context=payload.context,
+            api_key=payload.api_key,
+            base_url=payload.base_url,
+            model_override=payload.model,
+        )
+
+    answer, _, _, _ = await asyncio.to_thread(run)
+
+    def stream_iter():
+        chunk_size = 80
+        for i in range(0, len(answer), chunk_size):
+            yield answer[i : i + chunk_size]
 
     return StreamingResponse(
         stream_iter(), media_type="text/plain; charset=utf-8"
