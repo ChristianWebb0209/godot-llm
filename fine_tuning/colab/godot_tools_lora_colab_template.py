@@ -28,11 +28,14 @@ import os
 from pathlib import Path
 
 if Path("/content").exists():
-    # Running in Colab
+    # Running in Colab: always ensure we have the latest main branch.
     if not Path("/content/godot-llm").exists():
         # Fresh clone
         !git clone https://github.com/ChristianWebb0209/godot-llm.git /content/godot-llm
     %cd /content/godot-llm
+    # Always pull latest from origin so template and training script updates apply.
+    !git fetch origin
+    !git reset --hard origin/master
 else:
     # Local / other environment – assume current working directory is repo root.
     print("Not in Colab; please ensure the working directory is the repo root.")
@@ -40,12 +43,12 @@ else:
 
 # ## 1. Install Python dependencies
 #
-# Versions below work together in Colab (numpy 2 + trl >= 0.12 avoids binary/schema issues).
-# Pip may warn about conflicts with preinstalled tensorflow/numba; those can be ignored.
+# We pin numpy<2 and trl==0.9.6 so SFTTrainer(tokenizer=...) works. Pip may warn
+# about other Colab packages (tensorflow, numba, etc.); those can be ignored.
 
 
-!pip install -U "numpy>=2.0" \
-  "trl>=0.12.0" \
+!pip install -q "numpy<2.0" \
+  "trl==0.9.6" \
   transformers==4.46.0 \
   accelerate==0.34.2 \
   datasets==3.0.0 \
@@ -54,7 +57,7 @@ else:
   sentencepiece \
   einops \
   jedi \
-  fsspec
+  "fsspec<=2024.6.1"
 
 
 # ## 1b. Troubleshooting: bitsandbytes CUDA / triton (run if model load fails)

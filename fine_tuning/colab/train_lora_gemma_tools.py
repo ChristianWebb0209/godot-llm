@@ -359,12 +359,13 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     """
     Build an SFTTrainer for supervised fine-tuning.
     We train the model to generate the 'text' field.
+    Tuned for ~15 GB Colab GPU: batch_size=1, max_seq_length=1024, gradient_checkpointing.
     """
     training_args = TrainingArguments(
         output_dir="./godot-tools-lora",
-        per_device_train_batch_size=2,
-        per_device_eval_batch_size=2,
-        gradient_accumulation_steps=8,
+        per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=16,
         num_train_epochs=2,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
@@ -376,7 +377,8 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         save_steps=200,
         save_total_limit=3,
         bf16=torch.cuda.is_available(),
-        fp16=not torch.cuda.is_available(),  # fallback if no BF16
+        fp16=not torch.cuda.is_available(),
+        gradient_checkpointing=True,
         report_to="none",
     )
 
@@ -386,7 +388,7 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         train_dataset=dataset["train"],
         eval_dataset=dataset["val"],
         dataset_text_field="text",
-        max_seq_length=2048,
+        max_seq_length=1024,
         args=training_args,
     )
     return trainer
