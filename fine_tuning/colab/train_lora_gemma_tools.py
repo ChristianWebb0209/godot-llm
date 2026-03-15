@@ -116,13 +116,22 @@ lora_config = LoraConfig(
 def load_jsonl_dataset(path: Path) -> Dataset:
     """
     Load a JSONL file into a Hugging Face Dataset.
-    Expects one JSON object per line.
+    Expects one JSON object per line. We load line-by-line and use from_list()
+    so that mixed types in nested fields (e.g. tool_calls[].arguments with
+    sometimes string, sometimes array values) do not trigger Arrow schema errors.
     """
     if not path.exists():
         raise FileNotFoundError(f"{path} does not exist")
-    # datasets.load_dataset can read jsonl directly via data_files
-    ds = load_dataset("json", data_files=str(path), split="train")
-    return ds
+    records: List[Dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            records.append(json.loads(line))
+    if not records:
+        raise ValueError(f"{path} is empty")
+    return Dataset.from_list(records)
 
 
 def safe_concat(datasets: List[Dataset]) -> Dataset:
