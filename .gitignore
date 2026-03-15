@@ -6,6 +6,9 @@ godot_plugin/*
 !godot_plugin/addons/
 !godot_plugin/addons/**
 
+# Lint capture test temp files
+godot_plugin/addons/godot_ai_assistant/tools/lint/_test_temp/
+
 # Python virtual env
 rag_service/.venv/
 

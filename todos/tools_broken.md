@@ -1,0 +1,2 @@
+
+i recently asked the llm to lint and fix something. it called lint, then called read, but never fixeed. it then tried to describe to me how to fix it manually. it should be fixing this itself using the tools. please analyze which tools are provided to it and ensure it knows how to use them.

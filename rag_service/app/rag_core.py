@@ -128,10 +128,14 @@ def _collect_code_results(
     language: Optional[str],
     top_k: int,
     importance_tiers: Tuple[float, float, float] = (0.6, 0.3, 0.0),
+    component_type: Optional[str] = None,
+    component_types: Optional[List[str]] = None,
 ) -> List[SourceChunk]:
     """
     Query the project_code collection in ChromaDB, preferring high-importance
-    snippets first, then gradually including lower-importance ones if needed.
+    snippets first. Optional component_type (single) or component_types (list) filter
+    by role/primary tag (e.g. "ui", "enemy", "2d_player_controller"). When both are
+    provided, component_types takes precedence (for path-based context e.g. enemy in path).
     """
     code_collection, _ = get_collections()[1], get_collections()[0]  # type: ignore[index]
     if code_collection is None:
@@ -140,10 +144,19 @@ def _collect_code_results(
     all_results: List[SourceChunk] = []
     seen_ids: set[str] = set()
 
+    # Normalize component filter: list of non-empty strings.
+    comp_filter: Optional[List[str]] = None
+    if component_types:
+        comp_filter = [c.strip() for c in component_types if c and str(c).strip()]
+    if not comp_filter and component_type and str(component_type).strip():
+        comp_filter = [component_type.strip()]
+
     for tier in importance_tiers:
         where: Dict[str, Any] = {"importance": {"$gte": tier}}
         if language:
             where["language"] = language
+        if comp_filter:
+            where["component_type"] = comp_filter[0] if len(comp_filter) == 1 else {"$in": comp_filter}
 
         try:
             results = code_collection.query(
@@ -183,4 +196,58 @@ def _collect_code_results(
             break
 
     return all_results[:top_k]
+
+
+def _collect_code_by_extends(
+    extends_class: str,
+    language: Optional[str] = None,
+    max_scripts: int = 3,
+) -> List[SourceChunk]:
+    """
+    Fetch full script documents from project_code that extend the given class.
+    Returns scripts ordered by importance (highest first). Used to attach
+    complete implementations when the user's request involves a specific
+    component (e.g. CharacterBody3D for a 3D player).
+    """
+    code_collection, _ = get_collections()[1], get_collections()[0]  # type: ignore[index]
+    if code_collection is None or not extends_class or extends_class == "Node":
+        return []
+
+    where: Dict[str, Any] = {"extends_class": extends_class}
+    if language:
+        where["language"] = language
+
+    try:
+        # Get more than we need so we can sort by importance and take top max_scripts.
+        results = code_collection.get(
+            where=where,
+            limit=max(20, max_scripts * 4),
+            include=["documents", "metadatas"],
+        )
+    except Exception:
+        return []
+
+    ids = results.get("ids", [])
+    documents = results.get("documents", [[]])[0] if results.get("documents") else []
+    metadatas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
+
+    out: List[SourceChunk] = []
+    for i, doc_id in enumerate(ids):
+        meta = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+        path = meta.get("path", str(doc_id))
+        importance = float(meta.get("importance", 0.0))
+        full_text = documents[i] if i < len(documents) else ""
+        out.append(
+            SourceChunk(
+                id=str(doc_id),
+                source_path=str(path),
+                score=importance,
+                text_preview=full_text,
+                metadata=meta,
+            )
+        )
+
+    # Sort by importance descending, then take top max_scripts.
+    out.sort(key=lambda s: (s.metadata.get("importance", 0.0), s.source_path), reverse=True)
+    return out[:max_scripts]
 

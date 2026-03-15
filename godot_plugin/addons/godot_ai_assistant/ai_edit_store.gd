@@ -2,10 +2,17 @@
 extends RefCounted
 class_name GodotAIEditStore
 
+## Single source of truth for AI edit state: what files/nodes were changed, timeline of
+## events, and pending proposals. Persists to user://. Used by:
+## - editor/editor_decorator.gd (reads: markers, strip_markers; applies to script/FS/scene trees)
+## - ui_tabs/changes_tab.gd (reads: events, pending, get_revert_info; writes: clear_file_status)
+## - backend/tool_runner.gd (writes: add_applied_file_change, add_node_change; reads: action icons)
+## This file is data/persistence + shared constants; it does not touch the editor UI.
+## Editor UI application lives in editor/editor_decorator.gd only.
+
 const STORE_PATH := "user://godot_ai_assistant_edits.json"
 
-## --- Editor styling: markers shown in script tabs, FileSystem tree, Scene tree ---
-## Staged/change indicators so user sees what was added, modified, removed, or failed.
+## --- Marker constants (used by editor_decorator to label script tabs, FileSystem, Scene tree) ---
 const FILE_MARKER_CREATED := "🟢 "   ## New file / just created
 const FILE_MARKER_MODIFIED := "🟡 "  ## Modified
 const FILE_MARKER_DELETED := "⚫ "   ## Deleted
@@ -20,6 +27,7 @@ const _NODE_MARKERS: Array = ["🧩 ", "🟡 "]
 ## --- Editor action type constants (unified for chat, timeline, and history) ---
 const ACTION_CREATE_FILE := "create_file"
 const ACTION_WRITE_FILE := "write_file"
+const ACTION_APPEND_TO_FILE := "append_to_file"
 const ACTION_APPLY_PATCH := "apply_patch"
 const ACTION_CREATE_SCRIPT := "create_script"
 const ACTION_DELETE_FILE := "delete_file"
@@ -31,6 +39,7 @@ const ACTION_SET_IMPORT_OPTION := "set_import_option"
 const _ACTION_DISPLAY: Dictionary = {
 	ACTION_CREATE_FILE: {"icon": "📄", "label": "Add file"},
 	ACTION_WRITE_FILE: {"icon": "✏️", "label": "Write file"},
+	ACTION_APPEND_TO_FILE: {"icon": "➕", "label": "Append"},
 	ACTION_APPLY_PATCH: {"icon": "🔧", "label": "Patch"},
 	ACTION_CREATE_SCRIPT: {"icon": "📜", "label": "Create script"},
 	ACTION_DELETE_FILE: {"icon": "🗑️", "label": "Delete file"},
@@ -218,6 +227,20 @@ static func normalize_to_res_path(p: String) -> String:
 	if s.begins_with("res://"):
 		return s
 	return "res://" + s
+
+
+## Like normalize_to_res_path but also converts absolute project path to res:// (for editor UI matching).
+static func normalize_for_display_match(p: String) -> String:
+	var s := str(p).replace("\\", "/").strip_edges()
+	if s.is_empty():
+		return s
+	if s.begins_with("res://"):
+		return s
+	var project_root := ProjectSettings.globalize_path("res://").replace("\\", "/").rstrip("/")
+	if not project_root.is_empty() and s.begins_with(project_root):
+		var suffix := s.substr(project_root.length()).replace("\\", "/").strip_edges(true, false)
+		return "res://" + suffix.trim_prefix("/")
+	return s
 
 
 ## Strip any known file/node marker from a display string (for re-applying decorations).

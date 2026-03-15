@@ -53,6 +53,15 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_edit_events_timestamp ON edit_events(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_file_changes_edit_id ON file_changes(edit_id);
+
+            CREATE TABLE IF NOT EXISTS usage_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_usage_log_created_at ON usage_log(created_at DESC);
             """
         )
         conn.commit()
@@ -81,6 +90,46 @@ def _migrate_edit_events_columns(conn: sqlite3.Connection) -> None:
             else:
                 raise
     conn.commit()
+
+
+def record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    """Append one usage record (e.g. after each LLM request that has token counts)."""
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO usage_log (model, prompt_tokens, completion_tokens, created_at) VALUES (?, ?, ?, ?)",
+            (model or "unknown", int(prompt_tokens), int(completion_tokens), time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_usage_totals() -> Dict[str, Any]:
+    """Return aggregated usage: total_prompt_tokens, total_completion_tokens, by_model { model: { prompt_tokens, completion_tokens } }."""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT model, SUM(prompt_tokens) AS prompt_tokens, SUM(completion_tokens) AS completion_tokens
+               FROM usage_log GROUP BY model"""
+        ).fetchall()
+        by_model: Dict[str, Dict[str, int]] = {}
+        total_prompt = 0
+        total_completion = 0
+        for r in rows:
+            model = r["model"] or "unknown"
+            pt = int(r["prompt_tokens"] or 0)
+            ct = int(r["completion_tokens"] or 0)
+            by_model[model] = {"prompt_tokens": pt, "completion_tokens": ct}
+            total_prompt += pt
+            total_completion += ct
+        return {
+            "total_prompt_tokens": total_prompt,
+            "total_completion_tokens": total_completion,
+            "by_model": by_model,
+        }
+    finally:
+        conn.close()
 
 
 def _sha256_text(s: Optional[str]) -> Optional[str]:

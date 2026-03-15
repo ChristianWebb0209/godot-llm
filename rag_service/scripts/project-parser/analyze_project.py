@@ -3,6 +3,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -10,6 +11,12 @@ from typing import Dict, List, Optional, Set, Tuple
 import chromadb
 from chromadb.utils import embedding_functions
 from dotenv import load_dotenv
+
+# Allow importing shared script_extends from scripts/common.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+from common.script_extends import is_native_godot_extends
 
 
 @dataclass
@@ -29,6 +36,9 @@ class ScriptInfo:
     tags: List[str] = field(default_factory=list)
     role: Optional[str] = None
     importance: float = 0.0
+    is_tool: bool = False  # @tool / [Tool] – editor-only, can down-weight in retrieval
+    class_name: Optional[str] = None  # GDScript class_name or C# class name
+    description: Optional[str] = None  # First comment block (top docstring), max ~200 chars for index
 
 
 @dataclass
@@ -46,6 +56,87 @@ def log(message: str) -> None:
     Simple stdout logger for CLI feedback.
     """
     print(message)
+
+
+# Default tag rules (used when tag_rules.json is missing).
+_DEFAULT_EXTENDS_TAGS: Dict[str, List[str]] = {
+    "CharacterBody2D": ["2d", "movement", "character"],
+    "CharacterBody3D": ["3d", "movement", "character"],
+    "Node2D": ["2d"],
+    "Node3D": ["3d"],
+    "Control": ["ui"],
+}
+_DEFAULT_PATH_KEYWORDS: Dict[str, List[str]] = {
+    "player": ["player"], "hero": ["player"],
+    "enemy": ["enemy", "ai"], "mob": ["enemy", "ai"],
+    "ui": ["ui", "menu"], "menu": ["ui", "menu"], "hud": ["ui", "menu"], "pause": ["ui", "menu"],
+    "level": ["level"], "world": ["level"], "map": ["level"],
+    "main": ["main"], "game": ["main"],
+}
+
+
+def _load_tag_rules() -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
+    """Load extends and path_keywords from tag_rules.json; fall back to defaults."""
+    rules_path = Path(__file__).resolve().parent / "tag_rules.json"
+    if not rules_path.exists():
+        return _DEFAULT_EXTENDS_TAGS.copy(), _DEFAULT_PATH_KEYWORDS.copy()
+    try:
+        data = json.loads(rules_path.read_text(encoding="utf-8"))
+        extends = {k: list(v) for k, v in (data.get("extends") or {}).items()}
+        path_kw = {k: list(v) for k, v in (data.get("path_keywords") or {}).items()}
+        return extends or _DEFAULT_EXTENDS_TAGS.copy(), path_kw or _DEFAULT_PATH_KEYWORDS.copy()
+    except (json.JSONDecodeError, OSError):
+        return _DEFAULT_EXTENDS_TAGS.copy(), _DEFAULT_PATH_KEYWORDS.copy()
+
+
+_MAX_DESCRIPTION_LEN = 200
+
+
+def _extract_top_comment(lines: List[str], language: str) -> str:
+    """
+    Extract the first comment block for index/Chroma (description).
+    Returns a single line or short paragraph, capped at _MAX_DESCRIPTION_LEN chars.
+    """
+    collected: List[str] = []
+    if language == "gdscript":
+        for ln in lines[:25]:
+            s = ln.strip()
+            if s.startswith("#"):
+                part = s.lstrip("#").strip()
+                if part:
+                    collected.append(part)
+            elif collected and s:
+                break
+    elif language == "csharp":
+        in_block = False
+        for ln in lines[:30]:
+            s = ln.strip()
+            if s.startswith("///"):
+                collected.append(s.lstrip("/").strip())
+            elif s.startswith("/*"):
+                in_block = True
+                content = s[2:].split("*/", 1)[0].strip()
+                if content:
+                    collected.append(content)
+            elif in_block:
+                if "*/" in s:
+                    in_block = False
+                    content = s.split("*/", 1)[0].strip()
+                    if content:
+                        collected.append(content)
+                else:
+                    collected.append(s)
+            elif s.startswith("//") and not collected:
+                collected.append(s.lstrip("/").strip())
+            elif collected and s and not s.startswith("//"):
+                break
+    if not collected:
+        return ""
+    out = " ".join(collected).replace("\n", " ").strip()
+    out = re.sub(r"\s+", " ", out)
+    if len(out) > _MAX_DESCRIPTION_LEN:
+        out = out[:_MAX_DESCRIPTION_LEN - 3].rsplit(" ", 1)[0] + "..."
+    return out
 
 
 def read_project_godot(project_root: Path) -> Tuple[Optional[str], Dict[str, str]]:
@@ -162,6 +253,16 @@ def analyze_script(script_path: Path, project_root: Path) -> ScriptInfo:
             extends = m.group(1).strip('"')
             break
 
+    # @tool and class_name (first 30 lines).
+    is_tool = any(re.search(r'^\s*@tool\b', ln) for ln in lines[:30])
+    class_name_val: Optional[str] = None
+    class_name_re = re.compile(r'^\s*class_name\s+([A-Za-z0-9_]+)')
+    for ln in lines[:30]:
+        m = class_name_re.match(ln)
+        if m:
+            class_name_val = m.group(1)
+            break
+
     uses_signals = any("signal " in ln or ".connect(" in ln or "emit_signal" in ln for ln in lines)
     uses_input = any("Input." in ln or "InputMap" in ln for ln in lines)
     uses_callbacks = any(
@@ -170,6 +271,7 @@ def analyze_script(script_path: Path, project_root: Path) -> ScriptInfo:
     uses_physics_move = any(
         "move_and_slide" in ln or "move_and_collide" in ln for ln in lines
     )
+    description = _extract_top_comment(lines, "gdscript") or None
 
     return ScriptInfo(
         path=script_path,
@@ -181,13 +283,46 @@ def analyze_script(script_path: Path, project_root: Path) -> ScriptInfo:
         uses_input=uses_input,
         uses_callbacks=uses_callbacks,
         uses_physics_move=uses_physics_move,
+        is_tool=is_tool,
+        class_name=class_name_val,
+        description=description,
     )
+
+
+# Known Godot C# base types (engine nodes/resources). Used to treat a .cs file as a
+# Godot script and to avoid indexing non-Godot C# (e.g. tooling) as "Node".
+# Normalized names only (no "Godot." prefix). Add engine types as needed.
+GODOT_CSHARP_BASE_TYPES: Set[str] = {
+    "Node", "Node2D", "Node3D", "Control", "CharacterBody2D", "CharacterBody3D",
+    "RigidBody2D", "RigidBody3D", "StaticBody2D", "StaticBody3D",
+    "Area2D", "Area3D", "Camera2D", "Camera3D", "Sprite2D", "Sprite3D",
+    "MeshInstance2D", "MeshInstance3D", "CollisionShape2D", "CollisionShape3D",
+    "AnimationPlayer", "AnimationTree", "AudioStreamPlayer", "AudioStreamPlayer2D", "AudioStreamPlayer3D",
+    "Resource", "RefCounted", "Object", "GodotObject",
+    "PhysicsBody2D", "PhysicsBody3D", "CollisionObject2D", "CollisionObject3D",
+    "CanvasItem", "Viewport", "Window", "SubViewport",
+    "Shader", "ShaderMaterial", "Material", "BaseMaterial3D",
+    "Variant", "StringName", "NodePath",
+}
+
+
+def _normalize_csharp_extends(base: str) -> str:
+    """Strip Godot. prefix so extends_class matches GDScript and docs (e.g. CharacterBody2D)."""
+    if not base:
+        return ""
+    s = base.strip()
+    if s.startswith("Godot."):
+        return s[6:].strip()
+    return s
 
 
 def analyze_csharp_script(script_path: Path, project_root: Path) -> ScriptInfo:
     """
     Lightweight analyzer for Godot C# scripts.
-    Mirrors the GDScript analyzer but uses C# syntax heuristics.
+    - Extracts base class from `class Name : BaseType` or `class Name : Godot.BaseType`.
+    - Normalizes to engine name (strips Godot. prefix).
+    - If base is not a known Godot type, sets extends=None so the script is not
+      indexed as a Godot component (avoids polluting project_code with tooling/non-Godot C#).
     """
     rel = script_path.relative_to(project_root).as_posix()
     text = script_path.read_text(encoding="utf-8", errors="ignore")
@@ -202,7 +337,11 @@ def analyze_csharp_script(script_path: Path, project_root: Path) -> ScriptInfo:
     for ln in lines[:50]:
         m = class_re.match(ln)
         if m:
-            extends = m.group(1)
+            raw_base = m.group(1)
+            normalized = _normalize_csharp_extends(raw_base)
+            # Only treat as Godot script if base is a known engine type.
+            if normalized in GODOT_CSHARP_BASE_TYPES:
+                extends = normalized
             break
 
     uses_signals = any(
@@ -217,6 +356,18 @@ def analyze_csharp_script(script_path: Path, project_root: Path) -> ScriptInfo:
         "MoveAndSlide" in ln or "MoveAndCollide" in ln for ln in lines
     )
 
+    # [Tool] and class name from declaration.
+    is_tool = any(re.search(r'^\s*\[Tool\]', ln) for ln in lines[:30])
+    class_name_val: Optional[str] = None
+    class_match = re.search(
+        r'^\s*(?:public\s+|internal\s+|partial\s+)*class\s+([A-Za-z0-9_]+)',
+        "\n".join(lines[:50]),
+        re.MULTILINE,
+    )
+    if class_match:
+        class_name_val = class_match.group(1)
+    description = _extract_top_comment(lines, "csharp") or None
+
     return ScriptInfo(
         path=script_path,
         rel_path=rel,
@@ -227,6 +378,9 @@ def analyze_csharp_script(script_path: Path, project_root: Path) -> ScriptInfo:
         uses_input=uses_input,
         uses_callbacks=uses_callbacks,
         uses_physics_move=uses_physics_move,
+        is_tool=is_tool,
+        class_name=class_name_val,
+        description=description,
     )
 
 
@@ -256,32 +410,51 @@ def analyze_gdshader(script_path: Path, project_root: Path) -> ScriptInfo:
     )
 
 
+def _infer_shader_tags(script_path: Path) -> List[str]:
+    """Infer tags from .gdshader render_mode (canvas_item, spatial, particles)."""
+    tags: List[str] = ["shader"]
+    try:
+        text = script_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return tags
+    # render_mode unquote_render_mode canvas_item | spatial | particles | sky | ...
+    for line in text.splitlines()[:40]:
+        line = line.strip()
+        if "render_mode" in line:
+            if "canvas_item" in line:
+                tags.append("canvas_item")
+            if "spatial" in line:
+                tags.append("spatial")
+            if "particles" in line:
+                tags.append("particles")
+            if "sky" in line:
+                tags.append("sky")
+            break
+    return tags
+
+
 def infer_tags_and_role(info: ScriptInfo) -> None:
+    extends_rules, path_keywords = _load_tag_rules()
     tags: Set[str] = set()
 
-    # Dimensionality / type from extends.
+    # Config-driven: extends -> tags (match any rule key that appears in extends).
     if info.extends:
-        if "CharacterBody2D" in info.extends:
-            tags.update(["2d", "movement", "character"])
-        elif "CharacterBody3D" in info.extends:
-            tags.update(["3d", "movement", "character"])
-        elif "Node2D" in info.extends:
-            tags.add("2d")
-        elif "Node3D" in info.extends:
-            tags.add("3d")
-        elif "Control" in info.extends:
-            tags.add("ui")
+        for key, tag_list in extends_rules.items():
+            if key in info.extends:
+                tags.update(tag_list)
 
-    # Path keywords.
+    # Config-driven: path keywords.
     lower_path = info.rel_path.lower()
-    if "player" in lower_path or "hero" in lower_path:
-        tags.add("player")
-    if "enemy" in lower_path or "mob" in lower_path:
-        tags.update(["enemy", "ai"])
-    if any(k in lower_path for k in ["ui", "menu", "hud", "pause"]):
-        tags.update(["ui", "menu"])
-    if any(k in lower_path for k in ["level", "world", "map"]):
-        tags.add("level")
+    for keyword, tag_list in path_keywords.items():
+        if keyword in lower_path:
+            tags.update(tag_list)
+
+    # Shader: infer from render_mode (read file).
+    if info.language == "gdshader":
+        tags.update(_infer_shader_tags(info.path))
+        info.tags = sorted(tags)
+        info.role = None
+        return
 
     # API usage tags.
     if info.uses_input:
@@ -291,9 +464,13 @@ def infer_tags_and_role(info: ScriptInfo) -> None:
     if info.uses_physics_move:
         tags.update(["physics", "movement"])
 
+    # Editor/tool scripts: down-weight or filter in retrieval.
+    if info.is_tool:
+        tags.add("editor")
+
     info.tags = sorted(tags)
 
-    # Simple role inference.
+    # Role: single component_type for Chroma filter; expand heuristics as needed.
     role: Optional[str] = None
     if "2d" in tags and "movement" in tags and "character" in tags and "player" in tags:
         role = "2d_player_controller"
@@ -301,6 +478,8 @@ def infer_tags_and_role(info: ScriptInfo) -> None:
         role = "pause_menu_ui"
     elif "enemy" in tags and "ai" in tags and "2d" in tags:
         role = "basic_enemy_ai"
+    elif "editor" in tags:
+        role = "editor_plugin"
     info.role = role
 
 
@@ -401,37 +580,227 @@ def build_scene_graph(
                 queue.append(sub_rel)
 
 
+def _safe_extends_dir(extends: str) -> str:
+    """Folder-safe name for extends class (e.g. CharacterBody2D -> CharacterBody2D)."""
+    return re.sub(r'[\\/:*?"<>|\s]+', "_", (extends or "").strip()).strip("_") or "Node"
+
+
+# Directories under scraped_repos we skip when scanning component folders.
+_SCRAPED_SKIP_DIRS = frozenset({"_repos", "index"})
+
+# Max entries per index file so they stay usable in context (~few hundred).
+MAX_ENTRIES_PER_INDEX = 400
+
+
+def _safe_index_suffix(s: str) -> str:
+    """Safe filename suffix (alnum + underscore)."""
+    return re.sub(r"[^a-zA-Z0-9_]", "_", (s or "").strip()).strip("_") or "general"
+
+
+# Path keywords used to sub-split "general" into meaningful buckets for context.
+_PATH_SEMANTIC_KEYWORDS: List[Tuple[str, str]] = [
+    ("player", "player"), ("hero", "player"),
+    ("enemy", "enemy"), ("mob", "enemy"), ("ai", "enemy"),
+    ("menu", "ui"), ("ui", "ui"), ("hud", "ui"), ("pause", "ui"),
+    ("editor", "editor"),
+    ("main", "main"), ("game", "main"),
+    ("level", "level"), ("world", "level"), ("map", "level"),
+]
+
+
+def _semantic_group_key(entry: Dict) -> str:
+    """
+    Meaningful group key for context: role > first tag > general.
+    Used so we know what to load into context (e.g. 'pause_menu_ui', 'ui', 'signals').
+    """
+    role = (entry.get("role") or "").strip()
+    if role:
+        return role
+    tags = entry.get("tags") or []
+    if tags:
+        return tags[0]
+    return "general"
+
+
+def _path_semantic_bucket(rel_path: str) -> str:
+    """
+    Bucket from path for sub-splitting large groups (player, enemy, ui, editor, main, level, misc).
+    So we get meaningful chunks like index_main_player.json, index_general_ui.json.
+    """
+    lower = rel_path.lower()
+    for _keyword, bucket in _PATH_SEMANTIC_KEYWORDS:
+        if _keyword in lower:
+            return bucket
+    return "misc"
+
+
+def analyze_scraped_root(
+    scraped_root: Path,
+    importance_threshold: float,
+    dry_run: bool,
+) -> None:
+    """
+    Scan the scraped_repos component layout: recurse each component folder (Node2D,
+    Camera3D, etc.), analyze every script/shader, and write index file(s) per component.
+    No project.godot; extends come from the folder name. Large components are split by
+    meaning: role (e.g. 2d_player_controller) or first tag (ui, signals, main), then by
+    path semantics (player, enemy, ui, editor, level, misc) if still > MAX. No master index.
+    """
+    scraped_root = scraped_root.resolve()
+    if not scraped_root.is_dir():
+        log(f"[scraped] Root does not exist or is not a directory: {scraped_root}")
+        return
+
+    KEEP_EXTENSIONS = (".gd", ".cs", ".gdshader")
+    # Component name = first path segment under scraped_root (e.g. Node2D, Other).
+    component_scripts: Dict[str, List[ScriptInfo]] = {}
+
+    for comp_dir in sorted(scraped_root.iterdir()):
+        if not comp_dir.is_dir() or comp_dir.name in _SCRAPED_SKIP_DIRS:
+            continue
+        component_name = comp_dir.name
+        component_scripts[component_name] = []
+        for path in comp_dir.rglob("*"):
+            if not path.is_file() or path.suffix.lower() not in KEEP_EXTENSIONS:
+                continue
+            try:
+                rel = path.relative_to(scraped_root).as_posix()
+            except ValueError:
+                continue
+            if path.suffix.lower() == ".gd":
+                info = analyze_script(path, scraped_root)
+            elif path.suffix.lower() == ".cs":
+                info = analyze_csharp_script(path, scraped_root)
+            else:
+                info = analyze_gdshader(path, scraped_root)
+            info.extends = component_name
+            component_scripts[component_name].append(info)
+
+    total = sum(len(v) for v in component_scripts.values())
+    log(f"[scraped] Found {total} scripts in {len(component_scripts)} component(s): {sorted(component_scripts.keys())}")
+
+    for info in (i for infos in component_scripts.values() for i in infos):
+        infer_tags_and_role(info)
+        info.importance = compute_importance(info)
+
+    all_meta: Dict[str, Dict] = {}
+    for component_name, infos in component_scripts.items():
+        entries: List[Dict] = []
+        for info in infos:
+            component_type = (info.role or "").strip() or (info.tags[0] if info.tags else "general")
+            entry: Dict = {
+                "path": info.rel_path,
+                "project_id": "scraped",
+                "rel_path": info.rel_path,
+                "extends_class": component_name,
+                "component_type": component_type,
+                "role": info.role,
+                "language": info.language,
+                "tags": info.tags or [],
+                "importance": float(info.importance),
+            }
+            if info.class_name:
+                entry["class_name"] = info.class_name
+            if info.description:
+                desc = (info.description or "").strip()
+                if len(desc) > _MAX_DESCRIPTION_LEN:
+                    desc = desc[:_MAX_DESCRIPTION_LEN]
+                entry["description"] = desc
+            entries.append(entry)
+            info_dict = asdict(info)
+            info_dict["path"] = info.rel_path
+            info_dict["component_type"] = component_type
+            for key, value in list(info_dict.items()):
+                if isinstance(value, set):
+                    info_dict[key] = sorted(value)
+            all_meta[info.rel_path] = info_dict
+            if isinstance(info_dict.get("path"), Path):
+                info_dict["path"] = str(info_dict["path"])
+
+        if dry_run:
+            if len(entries) <= MAX_ENTRIES_PER_INDEX:
+                log(f"[scraped] Would write {component_name}/index.json ({len(entries)} entries)")
+            else:
+                log(f"[scraped] Would write {component_name}/index_*.json (split from {len(entries)} entries)")
+            continue
+
+        comp_dir_path = scraped_root / component_name
+        comp_dir_path.mkdir(parents=True, exist_ok=True)
+
+        if len(entries) <= MAX_ENTRIES_PER_INDEX:
+            (comp_dir_path / "index.json").write_text(json.dumps(entries, indent=2), encoding="utf-8")
+            log(f"[scraped] Wrote {component_name}/index.json ({len(entries)} entries)")
+        else:
+            # Group by meaning: role > first tag > general (so we know what to put in context).
+            by_semantic: Dict[str, List[Dict]] = {}
+            for e in entries:
+                key = _semantic_group_key(e)
+                by_semantic.setdefault(key, []).append(e)
+            written = 0
+            for sem_key, group in sorted(by_semantic.items()):
+                if len(group) <= MAX_ENTRIES_PER_INDEX:
+                    name = f"index_{_safe_index_suffix(sem_key)}.json"
+                    (comp_dir_path / name).write_text(json.dumps(group, indent=2), encoding="utf-8")
+                    log(f"[scraped] Wrote {component_name}/{name} ({len(group)} entries)")
+                    written += 1
+                else:
+                    # Sub-split by path meaning (player, enemy, ui, editor, main, level, misc).
+                    by_path: Dict[str, List[Dict]] = {}
+                    for e in group:
+                        bucket = _path_semantic_bucket(e.get("rel_path", ""))
+                        sub_key = f"{sem_key}_{bucket}"
+                        by_path.setdefault(sub_key, []).append(e)
+                    for sub_key, sub in sorted(by_path.items()):
+                        name = f"index_{_safe_index_suffix(sub_key)}.json"
+                        (comp_dir_path / name).write_text(json.dumps(sub, indent=2), encoding="utf-8")
+                        log(f"[scraped] Wrote {component_name}/{name} ({len(sub)} entries)")
+                        written += 1
+            log(f"[scraped] {component_name}: {written} index file(s) from {len(entries)} entries")
+
+    if not dry_run and all_meta:
+        index_in_chromadb(project_slug="scraped", source_root=scraped_root, selected_meta=all_meta)
+
+
 def copy_important_scripts(
     scripts: Dict[str, ScriptInfo],
     output_root: Path,
     importance_threshold: float,
     dry_run: bool,
+    project_slug: Optional[str] = None,
+    scraped_output: bool = False,
 ) -> Dict[str, Dict]:
     """
-    Copy scripts with importance >= threshold to output_root, preserving relative paths.
-    Returns metadata dict keyed by rel_path.
+    Copy scripts with importance >= threshold to output_root.
+    - Normal mode: output_root / project_slug / rel (preserves relative paths).
+    - Scraped mode: output_root / <ExtendsClass> / project_slug__path__file.ext (skips Other/non-native).
+    Returns metadata dict keyed by rel_path (or by new path in scraped mode).
     """
     meta: Dict[str, Dict] = {}
     for rel, info in scripts.items():
         if info.importance < importance_threshold:
             continue
-        dst = output_root / rel
+        extends = (info.extends or "").strip() or "Node"
+        if scraped_output:
+            if not project_slug:
+                continue
+            if not is_native_godot_extends(extends):
+                continue  # Skip Other / non-native; do not write to scraped_repos/Other
+            safe_extends = _safe_extends_dir(extends)
+            unique_name = f"{project_slug}__{rel.replace('/', '__')}"
+            dst = output_root / safe_extends / unique_name
+        else:
+            dst = output_root / rel
         if not dry_run:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(info.path, dst)
-        # Persist ScriptInfo to metadata, but:
-        # - Do NOT include local absolute paths.
-        # - Normalize "path" to the project-relative path.
-        # - Drop "role" for now (heuristics not reliable yet).
+        # Persist ScriptInfo to metadata; path is either rel or (scraped) extends_class/unique_name.
         info_dict = asdict(info)
-        # Normalize path to rel_path for consumers and avoid leaking local disk paths.
-        info_dict["path"] = rel
-        # Remove raw filesystem path and role from serialized metadata.
-        info_dict.pop("role", None)
-        # Convert non-JSON-serializable values to plain types.
+        out_path = f"{_safe_extends_dir(extends)}/{project_slug}__{rel.replace('/', '__')}" if scraped_output else rel
+        info_dict["path"] = out_path
+        component_type = (info.role or "").strip() or (info.tags[0] if info.tags else "general")
+        info_dict["component_type"] = component_type
         if isinstance(info_dict.get("path"), Path):
             info_dict["path"] = str(info_dict["path"])
-        # Convert any sets (e.g. referenced_by_scenes) to sorted lists.
         for key, value in list(info_dict.items()):
             if isinstance(value, set):
                 info_dict[key] = sorted(value)
@@ -465,26 +834,32 @@ def index_in_chromadb(
 
     client = chromadb.PersistentClient(path=str(db_root))
 
+    # Embeddings: only use OpenAI if key is set AND you didn't opt out (saves API credits).
+    # With no key, or USE_LOCAL_EMBEDDINGS=1, Chroma uses local all-MiniLM-L6-v2 (free).
+    use_local = os.getenv("USE_LOCAL_EMBEDDINGS", "").strip().lower() in ("1", "true", "yes")
     openai_api_key = os.getenv("OPENAI_API_KEY")
     openai_base_url = os.getenv("OPENAI_BASE_URL")
     embedding_fn = None
-    if openai_api_key:
+    if openai_api_key and not use_local:
         embedding_fn = embedding_functions.OpenAIEmbeddingFunction(
             api_key=openai_api_key,
             model_name=os.getenv("OPENAI_EMBED_MODEL", "text-embedding-3-small"),
             api_base=openai_base_url or None,
         )
+        log("[chroma] Using OpenAI embeddings for project_code (uses API credits). Set USE_LOCAL_EMBEDDINGS=1 to use free local embeddings.")
+    else:
+        if use_local:
+            log("[chroma] USE_LOCAL_EMBEDDINGS=1; using local embeddings for project_code (no API cost).")
+        else:
+            log("[chroma] No OPENAI_API_KEY; using local embeddings for project_code (no API cost).")
 
-    # Use the same embedding configuration as the backend; if the collection
-    # already exists with a different embedding function, fall back to the
-    # existing one to avoid crashes (you can clear chroma_db/ to rebuild).
+    # Rebuild from scratch so we always use the intended embedding (no stale default).
     try:
-        collection = client.get_or_create_collection(
-            "project_code", embedding_function=embedding_fn
-        )
-    except ValueError as e:
-        log(f"[chroma] WARNING: embedding function conflict for 'project_code': {e}")
-        collection = client.get_collection("project_code")
+        client.delete_collection("project_code")
+        log("[chroma] Deleted existing project_code collection; rebuilding.")
+    except Exception:
+        pass  # Collection did not exist
+    collection = client.create_collection("project_code", embedding_function=embedding_fn)
 
     ids: List[str] = []
     documents: List[str] = []
@@ -499,27 +874,162 @@ def index_in_chromadb(
             log(f"[chroma] Skipping missing file for indexing: {script_path}")
             continue
 
-        ids.append(f"{project_slug}:{rel}")
-        documents.append(text)
+        extends_class = (info.get("extends") or "").strip()
+        # Skip non-Godot C# (e.g. tooling): they have extends=None and would pollute "Node".
+        if info.get("language") == "csharp" and not extends_class:
+            continue
+
         tags = info.get("tags") or []
+        component_type = (info.get("component_type") or "").strip() or "general"
+        class_name = (info.get("class_name") or "").strip()
+        description = (info.get("description") or "").strip()
+        if len(description) > _MAX_DESCRIPTION_LEN:
+            description = description[:_MAX_DESCRIPTION_LEN]
+        # One-line prefix so embeddings see extends/class/summary; minimal space.
+        prefix_parts = [f"extends {extends_class or 'Node'}"]
+        if class_name:
+            prefix_parts.append(f"class {class_name}")
+        if description:
+            prefix_parts.append(description)
+        doc_prefix = "# " + " | ".join(prefix_parts) + "\n\n"
+        document_text = doc_prefix + text
+        # OpenAI embedding models (e.g. text-embedding-3-small) have an 8192-token limit per input.
+        # Truncate by chars to stay under (~4 chars/token for code).
+        _MAX_EMBED_CHARS = 30_000  # ~7500 tokens
+        if len(document_text) > _MAX_EMBED_CHARS:
+            document_text = document_text[:_MAX_EMBED_CHARS] + "\n# ... (truncated for embedding)"
+
+        ids.append(f"{project_slug}:{rel}")
+        documents.append(document_text)
+        stored_path = info.get("path", rel)
+        if isinstance(stored_path, Path):
+            stored_path = str(stored_path)
         md: Dict[str, object] = {
             "project_id": project_slug,
-            "path": rel,
+            "path": stored_path,
             "language": info.get("language", ""),
             "importance": info.get("importance", 0.0),
+            "extends_class": extends_class if extends_class else "Node",
+            "component_type": component_type,
         }
-        # Only include tags key if it is non-empty to satisfy Chroma's metadata validator.
         if tags:
             md["tags"] = tags
+        role = (info.get("role") or "").strip()
+        if role:
+            md["role"] = role
+        if class_name:
+            md["class_name"] = class_name
+        if description:
+            md["description"] = description
         metadatas.append(md)
 
     if not ids:
         log("[chroma] No valid documents collected for ChromaDB; nothing to add.")
         return
 
-    log(f"[chroma] Indexing {len(ids)} documents into ChromaDB at {db_root}...")
-    collection.add(ids=ids, documents=documents, metadatas=metadatas)
+    # Add in batches to avoid huge single requests; each document is already truncated to fit embedding model limit.
+    BATCH_SIZE = 200
+    total = len(ids)
+    log(f"[chroma] Indexing {total} documents into ChromaDB at {db_root}...")
+    for start in range(0, total, BATCH_SIZE):
+        end = min(start + BATCH_SIZE, total)
+        batch_ids = ids[start:end]
+        batch_docs = documents[start:end]
+        batch_meta = metadatas[start:end]
+        collection.add(ids=batch_ids, documents=batch_docs, metadatas=batch_meta)
+        log(f"[chroma] Indexed {end}/{total} documents.")
     log("[chroma] Indexing complete.")
+
+
+def write_index_files(
+    project_slug: str,
+    output_root: Path,
+    selected_meta: Dict[str, Dict],
+    scraped_output: bool = False,
+) -> None:
+    """
+    Write master index (all scripts with tags, extends, importance) and per-component
+    index files. Enables: one master index.json for the whole codebase, plus
+    by_extends/<ExtendsClass>.json listing scripts that extend that class from any repo.
+    When scraped_output=True, index lives under output_root/index (not output_root.parent/index),
+    and entries use the component-relative path; by_extends skips "Other".
+    """
+    if not selected_meta:
+        return
+
+    if scraped_output:
+        index_root = output_root / "index"
+    else:
+        index_root = output_root.parent / "index"
+    index_root.mkdir(parents=True, exist_ok=True)
+    by_extends_dir = index_root / "by_extends"
+    by_extends_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build entries for this project.
+    entries: List[Dict] = []
+    for rel, info in selected_meta.items():
+        extends_class = (info.get("extends") or "").strip() or "Node"
+        component_type = (info.get("component_type") or "").strip() or "general"
+        # In scraped mode path is already extends_class/unique_name; otherwise project_slug/rel.
+        path_val = info.get("path", rel)
+        if isinstance(path_val, Path):
+            path_val = str(path_val)
+        if not scraped_output:
+            path_val = f"{project_slug}/{rel}"
+        entry: Dict = {
+            "path": path_val,
+            "project_id": project_slug,
+            "rel_path": rel,
+            "extends_class": extends_class,
+            "component_type": component_type,
+            "role": info.get("role"),
+            "language": info.get("language", ""),
+            "tags": info.get("tags") or [],
+            "importance": float(info.get("importance", 0.0)),
+        }
+        if info.get("class_name"):
+            entry["class_name"] = info.get("class_name")
+        if info.get("description"):
+            desc = (info.get("description") or "").strip()
+            if len(desc) > _MAX_DESCRIPTION_LEN:
+                desc = desc[:_MAX_DESCRIPTION_LEN]
+            entry["description"] = desc
+        entries.append(entry)
+
+    # Master index: merge with existing (replace entries for this project_slug, then add new).
+    master_path = index_root / "master.json"
+    existing_master: List[Dict] = []
+    if master_path.exists():
+        try:
+            existing_master = json.loads(master_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            existing_master = []
+    existing_master = [e for e in existing_master if e.get("project_id") != project_slug]
+    existing_master.extend(entries)
+    master_path.write_text(json.dumps(existing_master, indent=2), encoding="utf-8")
+    log(f"[index] Wrote master index ({len(existing_master)} total entries) to {master_path}")
+
+    # Per-component: for each extends_class touched, merge into that file. Skip Other in scraped mode.
+    extends_seen: Set[str] = set()
+    for e in entries:
+        if scraped_output and (e["extends_class"] == "Other" or not is_native_godot_extends(e["extends_class"])):
+            continue
+        extends_seen.add(e["extends_class"])
+
+    for extends_class in extends_seen:
+        safe_name = _safe_extends_dir(extends_class)
+        comp_path = by_extends_dir / f"{safe_name}.json"
+        existing_comp: List[Dict] = []
+        if comp_path.exists():
+            try:
+                existing_comp = json.loads(comp_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                existing_comp = []
+        existing_comp = [e for e in existing_comp if e.get("project_id") != project_slug]
+        new_for_comp = [e for e in entries if e["extends_class"] == extends_class]
+        existing_comp.extend(new_for_comp)
+        comp_path.write_text(json.dumps(existing_comp, indent=2), encoding="utf-8")
+    log(f"[index] Wrote by_extends indexes for {len(extends_seen)} component(s)")
 
 
 def analyze_project(
@@ -528,6 +1038,7 @@ def analyze_project(
     importance_threshold: float,
     slug: Optional[str],
     dry_run: bool,
+    scraped_output: bool = False,
 ) -> None:
     log(f"[analyze_project] Source root: {source_root}")
     if not (source_root / "project.godot").exists():
@@ -595,14 +1106,19 @@ def analyze_project(
     project_slug = slug or source_root.name
     project_output_root = output_root / project_slug
     log(f"[analyze_project] Project slug: {project_slug}")
-    log(f"[analyze_project] Output root: {project_output_root}")
+    if scraped_output:
+        log(f"[analyze_project] Output: scraped component folders under {output_root} (excluding Other)")
+    else:
+        log(f"[analyze_project] Output root: {project_output_root}")
 
-    # Copy only important scripts.
+    # Copy only important scripts (per-component when scraped_output).
     meta = copy_important_scripts(
         scripts=scripts,
-        output_root=project_output_root,
+        output_root=output_root if scraped_output else project_output_root,
         importance_threshold=importance_threshold,
         dry_run=dry_run,
+        project_slug=project_slug if scraped_output else None,
+        scraped_output=scraped_output,
     )
     log(
         f"[analyze_project] Selected {len(meta)} scripts/shaders with "
@@ -616,12 +1132,17 @@ def analyze_project(
             source_root=source_root,
             selected_meta=meta,
         )
+        write_index_files(
+            project_slug=project_slug,
+            output_root=output_root,
+            selected_meta=meta,
+            scraped_output=scraped_output,
+        )
 
-    # Write a minimal PROJECT.md summary for humans/LLMs.
-    if not dry_run:
+    # Write a minimal PROJECT.md summary for humans/LLMs (only in non-scraped mode).
+    if not dry_run and not scraped_output:
         project_output_root.mkdir(parents=True, exist_ok=True)
 
-        # Simple PROJECT.md with a list of components.
         components_lines: List[str] = [
             "---",
             f"project_id: {project_slug}",
@@ -649,243 +1170,99 @@ def analyze_project(
 
 
 def main() -> None:
+    _base = Path(__file__).resolve().parent / ".." / ".." / ".."
+    default_scraped_root = (_base / "godot_knowledge_base" / "scraped_repos").resolve()
+
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze a Godot project, score scripts by importance, "
-            "and copy important scripts/shaders into the knowledge base."
+            "Analyze the scraped_repos component layout: recurse each component folder, "
+            "build index file(s) per component (split if >400 entries), and optionally ChromaDB."
         ),
         epilog=(
-            "USAGE MODES:\n"
-            "  1) Interactive (recommended while exploring):\n"
-            "       python analyze_project.py\n"
-            "     - Prompts for output root (demos folder).\n"
-            "     - Optionally cleans that folder.\n"
-            "     - Lets you set an importance threshold.\n"
-            "     - Then you can enter project roots one by one until 'exit'.\n"
-            "\n"
-            "  2) Single project:\n"
-            "       python analyze_project.py --source-root \"C:\\path\\to\\project\" \\\n"
-        "         [--output-root \"C:\\path\\to\\godot_knowledge_base\\code\\demos\"] \\\n"
-            "         [--importance-threshold 0.3] [--clean]\n"
-            "\n"
-            "  3) Batch directory of projects:\n"
-            "       python analyze_project.py --projects-root \"C:\\path\\to\\projects\" \\\n"
-        "         [--output-root \"C:\\path\\to\\godot_knowledge_base\\code\\demos\"] \\\n"
-            "         [--importance-threshold 0.3] [--clean]\n"
-            "\n"
-            "DETAILS:\n"
-            "  - Writes per-run logs under ./logs and opens the log in your editor on Windows.\n"
-            "  - Only scripts/shaders with importance >= threshold are copied.\n"
-            "  - Supports GDScript (*.gd), C# (*.cs), and shaders (*.gdshader).\n"
+            "DEFAULT: Scans godot_knowledge_base/scraped_repos (no CLI needed).\n"
+            "  - Skips _repos and index. Writes <Component>/index.json or index_<type>.json (split for Node/Other).\n"
+            "OPTIONAL: --source-root for a single Godot project (project.godot) instead.\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--source-root",
         type=str,
-        help="Path to a Godot project root (contains project.godot).",
+        help="If set, analyze a single Godot project (must contain project.godot) instead of scraped_repos.",
     )
     parser.add_argument(
-        "--projects-root",
+        "--scraped-root",
         type=str,
-        help="If set, scan all subdirectories containing project.godot under this root.",
+        default=str(default_scraped_root),
+        help=f"Root of component folders (default: {default_scraped_root}).",
     )
     parser.add_argument(
         "--output-root",
         type=str,
-        required=False,
-        help=(
-            "Output root under godot_knowledge_base/code "
-            "(default: ../godot_knowledge_base/code/demos relative to this script)."
-        ),
-    )
-    parser.add_argument(
-        "--slug",
-        type=str,
-        help="Optional slug / project_id override for a single project.",
+        help="For single-project mode only: where to copy scripts and write index.",
     )
     parser.add_argument(
         "--importance-threshold",
         type=float,
         default=0.3,
-        help="Only scripts with importance >= this value will be copied (default: 0.3).",
+        help="Used for single-project mode; scraped mode indexes all scripts.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Analyze and print but do not write any files.",
+        help="Analyze and log but do not write any files.",
     )
     parser.add_argument(
         "--clean",
         action="store_true",
-        help=(
-            "If set, delete everything under --output-root before running. "
-            "Use with care: this removes all existing demo outputs in that folder."
-        ),
+        help="Before running: delete scraped_repos/index (scraped mode) or --output-root (single-project).",
     )
 
     args = parser.parse_args()
+    importance_threshold = args.importance_threshold
 
-    # Determine output_root: from CLI or default location.
-    if args.output_root:
-        output_root = Path(args.output_root).resolve()
-    else:
-        # Default to repo-relative demos folder:
-        # rag_service/tools/project-parser/analyze_project.py
-        #   -> ../../../godot_knowledge_base/code/demos
-        base = Path(__file__).resolve()
-        output_root = (base.parent / ".." / ".." / ".." / "godot_knowledge_base" / "code" / "demos").resolve()
-        log(f"[main] Using default output root: {output_root}")
-
-    # Optionally clean the output root before analysis.
-    # Optionally clean the output root before analysis.
-    clean_flag = args.clean
-    # If no explicit flag and we're going to be interactive (no source/projects root),
-    # ask the user once whether to clean.
-    if not clean_flag and not args.source_root and not args.projects_root:
-        answer = input(
-            f"Clean output root first? This deletes everything under {output_root} (y/N): "
-        ).strip().lower()
-        clean_flag = answer in ("y", "yes")
-
-    if clean_flag:
-        if output_root.exists():
+    if args.source_root:
+        # Single Godot project mode (legacy).
+        source_root = Path(args.source_root).resolve()
+        output_root = Path(args.output_root).resolve() if args.output_root else (default_scraped_root.parent / "code" / "demos").resolve()
+        if args.clean and output_root.exists():
             log(f"[main] Cleaning output root: {output_root}")
             for child in output_root.iterdir():
                 if child.is_dir():
                     shutil.rmtree(child)
                 else:
                     child.unlink()
-        else:
-            log(f"[main] Output root does not exist, nothing to clean: {output_root}")
+        if not (source_root / "project.godot").exists():
+            log(f"[main] No project.godot under {source_root}; exiting.")
+            return 1
+        analyze_project(
+            source_root=source_root,
+            output_root=output_root,
+            importance_threshold=importance_threshold,
+            slug=None,
+            dry_run=args.dry_run,
+            scraped_output=False,
+        )
+        log("[main] Analysis completed successfully.")
+        return 0
 
-    # Decide mode: single source, batch, or interactive REPL-style.
-    if args.source_root and args.projects_root:
-        parser.error("Provide only one of --source-root or --projects-root, not both.")
-
-    # Decide importance threshold; in interactive mode we can let the user override.
-    importance_threshold = args.importance_threshold
-
-    if args.source_root:
-        # Single project mode. If the provided folder itself is not a Godot project
-        # but contains multiple sub-projects, treat it like --projects-root.
-        source_root = Path(args.source_root).resolve()
-        if (source_root / "project.godot").exists():
-            analyze_project(
-                source_root=source_root,
-                output_root=output_root,
-                importance_threshold=importance_threshold,
-                slug=args.slug,
-                dry_run=args.dry_run,
-            )
-        else:
-            # Fallback: scan this folder for nested projects.
-            log(f"[main] No project.godot directly under {source_root}, scanning for nested projects...")
-            project_count = 0
-            for project_file in source_root.rglob("project.godot"):
-                child = project_file.parent
-                log(f"[main] Analyzing project: {child}")
-                analyze_project(
-                    source_root=child,
-                    output_root=output_root,
-                    importance_threshold=importance_threshold,
-                    slug=None,
-                    dry_run=args.dry_run,
-                )
-                project_count += 1
-            if project_count == 0:
-                log(f"[main] No Godot projects (project.godot) found under {source_root}")
-    elif args.projects_root:
-        # Batch mode over a directory tree of projects.
-        projects_root = Path(args.projects_root).resolve()
-        log(f"[main] Scanning for Godot projects under {projects_root} ...")
-        # Recurse and treat any directory containing project.godot as a project root.
-        project_count = 0
-        for project_file in projects_root.rglob("project.godot"):
-            child = project_file.parent
-            log(f"[main] Analyzing project: {child}")
-            analyze_project(
-                source_root=child,
-                output_root=output_root,
-                importance_threshold=importance_threshold,
-                slug=None,
-                dry_run=args.dry_run,
-            )
-            project_count += 1
-        if project_count == 0:
-            log(f"[main] No Godot projects (project.godot) found under {projects_root}")
-    else:
-        # Interactive mode: prompt for project roots until the user exits.
-        default_projects_root = Path(r"C:\Users\caweb\Desktop\godot-demo-projects")
-        if default_projects_root.exists():
-            log(
-                "[main] Entering interactive mode. Press Enter to use the default "
-                f"projects folder: {default_projects_root}"
-            )
-        else:
-            log("[main] Entering interactive mode. Type a project root folder, or 'exit' to quit.")
-
-        # Allow the user to override the importance threshold interactively.
-        raw_thresh = input(
-            f"Importance threshold [default {importance_threshold}]: "
-        ).strip()
-        if raw_thresh:
-            try:
-                importance_threshold = float(raw_thresh)
-            except ValueError:
-                log(
-                    f"[main] Invalid threshold '{raw_thresh}', "
-                    f"keeping default {importance_threshold}."
-                )
-
-        while True:
-            try:
-                prompt = "Project root (empty for default, or 'exit'): " if default_projects_root.exists() else "Project root (or 'exit'): "
-                raw = input(prompt).strip()
-            except (EOFError, KeyboardInterrupt):
-                log("[main] Exiting interactive mode (keyboard interrupt).")
-                break
-
-            if not raw:
-                if default_projects_root.exists():
-                    source_root = default_projects_root
-                else:
-                    continue
-            elif raw.lower() in ("exit", "quit"):
-                log("[main] Exiting interactive mode.")
-                break
-            else:
-                source_root = Path(raw).expanduser().resolve()
-
-            # If the provided folder is not itself a project, scan for nested ones.
-            if not (source_root / "project.godot").exists():
-                log(f"[main] No project.godot directly under {source_root}, scanning for nested projects...")
-                nested_count = 0
-                for project_file in source_root.rglob("project.godot"):
-                    child = project_file.parent
-                    log(f"[main] Analyzing project: {child}")
-                    analyze_project(
-                        source_root=child,
-                        output_root=output_root,
-                        importance_threshold=importance_threshold,
-                        slug=None,
-                        dry_run=args.dry_run,
-                    )
-                    nested_count += 1
-                if nested_count == 0:
-                    log(f"[main] No Godot projects (project.godot) found under {source_root}")
-                continue
-
-            analyze_project(
-                source_root=source_root,
-                output_root=output_root,
-                importance_threshold=importance_threshold,
-                slug=None,
-                dry_run=args.dry_run,
-            )
+    # Default: scraped component layout.
+    scraped_root = Path(args.scraped_root).resolve()
+    if args.clean:
+        index_dir = scraped_root / "index"
+        if index_dir.exists():
+            log(f"[main] Cleaning index: {index_dir}")
+            shutil.rmtree(index_dir)
+    log(f"[main] Scanning component folders under {scraped_root}")
+    analyze_scraped_root(
+        scraped_root=scraped_root,
+        importance_threshold=importance_threshold,
+        dry_run=args.dry_run,
+    )
     log("[main] Analysis completed successfully.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
 

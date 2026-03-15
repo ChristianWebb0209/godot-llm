@@ -1,6 +1,8 @@
-[gd_scene load_steps=2 format=3 uid="uid://godot_ai_dock"]
+[gd_scene load_steps=4 format=3 uid="uid://godot_ai_dock"]
 
 [ext_resource type="Script" path="res://addons/godot_ai_assistant/ai_dock.gd" id="1"]
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/chat/prompt_input.gd" id="2"]
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/chat/chat_drop_zone.gd" id="3"]
 
 [node name="AIDock" type="Control"]
 layout_mode = 3
@@ -9,7 +11,7 @@ anchor_right = 1.0
 anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
-custom_minimum_size = Vector2(200, 180)
+custom_minimum_size = Vector2(160, 160)
 script = ExtResource("1")
 
 [node name="TabContainer" type="TabContainer" parent="."]
@@ -40,24 +42,39 @@ size_flags_vertical = 3
 
 [node name="ChatTabBarRow" type="HBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
-theme_override_constants/separation = 4
+theme_override_constants/separation = 6
+
+[node name="ChatsLabel" type="Label" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+theme_override_font_sizes/font_size = 13
+size_flags_horizontal = 4
+custom_minimum_size = Vector2(0, 0)
+text = "Chats"
+text_overrun_behavior = 3
+vertical_alignment = 1
 
 [node name="ChatTabBar" type="TabBar" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
+custom_minimum_size = Vector2(0, 28)
+tab_alignment = 0
+tab_close_display_policy = 2
 
 [node name="ContextUsageLabel" type="Label" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 3
-size_flags_stretch_ratio = 0.2
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(40, 0)
 text = "Ctx: 0%"
 text_overrun_behavior = 3
 
 [node name="NewChatButton" type="Button" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(44, 0)
 text = "+ New"
 
 [node name="ActivityBlock" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
@@ -105,30 +122,55 @@ size_flags_vertical = 3
 split_offset = 160
 collapsible = true
 
-[node name="OutputText" type="RichTextLabel" parent="TabContainer/Chat/VBox/IOContainer"]
-unique_name_in_owner = true
+[node name="ChatScroll" type="ScrollContainer" parent="TabContainer/Chat/VBox/IOContainer"]
 layout_mode = 2
 size_flags_vertical = 3
 custom_minimum_size = Vector2(0, 60)
-autowrap_mode = 3
-scroll_active = true
-selection_enabled = true
+script = ExtResource("3")
+
+[node name="ChatMessageList" type="VBoxContainer" parent="TabContainer/Chat/VBox/IOContainer/ChatScroll"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 0
+theme_override_constants/separation = 8
+
+[node name="PinnedContextRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+size_flags_vertical = 0
+theme_override_constants/separation = 6
+visible = false
+
+[node name="AddContextRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
+layout_mode = 2
+size_flags_vertical = 0
+theme_override_constants/separation = 6
+
+[node name="AddCurrentScriptButton" type="Button" parent="TabContainer/Chat/VBox/IOContainer/AddContextRow"]
+layout_mode = 2
+size_flags_vertical = 0
+text = "+ Add current script to context"
+tooltip_text = "Add the script currently open in the Script Editor to this chat's context (same as dragging the script tab)"
 
 [node name="PromptTextEdit" type="TextEdit" parent="TabContainer/Chat/VBox/IOContainer"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 1
 custom_minimum_size = Vector2(0, 44)
-placeholder_text = "Ask a question..."
+placeholder_text = "Ask a question... (drag files or scene nodes here, or use '+ Add current script' for the open script)"
 wrap_mode = 1
+script = ExtResource("2")
 
 [node name="BottomRow" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
 theme_override_constants/separation = 4
+size_flags_vertical = 0
 
-[node name="ToolRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/BottomRow"]
+[node name="ToolRow" type="HFlowContainer" parent="TabContainer/Chat/VBox/BottomRow"]
 layout_mode = 2
-theme_override_constants/separation = 6
+theme_override_constants/h_separation = 6
+theme_override_constants/v_separation = 4
 
 [node name="ModelLabel" type="Label" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 layout_mode = 2
@@ -137,7 +179,6 @@ text = "Model"
 [node name="ModelOption" type="OptionButton" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 0
 custom_minimum_size = Vector2(56, 0)
 theme_override_font_sizes/font_size = 13
 
@@ -157,10 +198,31 @@ layout_mode = 2
 button_pressed = true
 text = "Follow"
 
-[node name="AllowEditorActionsCheck" type="CheckButton" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
+[node name="ContextViewerButton" type="Button" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Tools"
+text = "Context viewer"
+
+[node name="ContextViewerPanel" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
+layout_mode = 2
+size_flags_vertical = 3
+visible = false
+theme_override_constants/separation = 6
+
+[node name="ContextViewerScroll" type="ScrollContainer" parent="TabContainer/Chat/VBox/ContextViewerPanel"]
+layout_mode = 2
+size_flags_vertical = 3
+
+[node name="ContextViewerList" type="VBoxContainer" parent="TabContainer/Chat/VBox/ContextViewerPanel/ContextViewerScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 8
+
+[node name="ContextViewerEmptyLabel" type="Label" parent="TabContainer/Chat/VBox/ContextViewerPanel"]
+layout_mode = 2
+theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
+text = "Send a message to see context for this chat."
+visible = false
 
 [node name="History" type="Control" parent="TabContainer"]
 layout_mode = 2
@@ -229,6 +291,22 @@ bbcode_enabled = true
 unique_name_in_owner = true
 layout_mode = 2
 text = "Undo selected edit"
+
+[node name="HistoryUsageVBox" type="VBoxContainer" parent="TabContainer/History/Margin/HistoryVBox"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="HistoryUsageTitle" type="Label" parent="TabContainer/History/Margin/HistoryVBox/HistoryUsageVBox"]
+layout_mode = 2
+text = "Usage"
+
+[node name="HistoryUsageLabel" type="Label" parent="TabContainer/History/Margin/HistoryVBox/HistoryUsageVBox"]
+unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+theme_override_font_sizes/font_size = 12
+text = "Tokens: —  |  Est. cost: —"
+autowrap_mode = 2
 
 [node name="Settings" type="Control" parent="TabContainer"]
 layout_mode = 2

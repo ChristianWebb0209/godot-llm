@@ -17,6 +17,7 @@ func _enter_tree() -> void:
 		return
 	_dock.set_editor_interface(get_editor_interface())
 	add_control_to_dock(DOCK_SLOT_RIGHT_UL, _dock)
+	add_tool_menu_item("Run lint capture tests", _on_run_lint_tests)
 
 
 func _add_fallback_dock() -> void:
@@ -30,7 +31,16 @@ func _add_fallback_dock() -> void:
 
 
 func _exit_tree() -> void:
+	remove_tool_menu_item("Run lint capture tests")
 	if _dock:
 		remove_control_from_docks(_dock)
 		_dock.queue_free()
 		_dock = null
+
+
+func _on_run_lint_tests() -> void:
+	var ok := GodotAILintCaptureTest.run_all_tests()
+	if ok:
+		print("Godot AI Assistant: Lint capture tests passed.")
+	else:
+		push_error("Godot AI Assistant: Lint capture tests failed. See Output above.")

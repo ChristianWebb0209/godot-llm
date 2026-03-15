@@ -600,3 +600,193 @@ def get_related_res_paths(
         except Exception:
             pass
 
+
+def get_most_referenced_res_paths(
+    *,
+    project_root_abs: str,
+    limit: int = 10,
+    edge_types: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """
+    Return res:// paths that are referenced the most often (by inbound edge count).
+    Use to find "project core" files (e.g. Player scene/script used in many scenes).
+
+    edge_types: if set, only count these edge_type values (e.g. ["instances_scene", "attaches_script"]).
+    """
+    rid = _default_repo_id(str(Path(project_root_abs).expanduser().resolve()))
+    db_path = _db_path_for_repo_id(rid)
+    init_repo_index_db(db_path)
+
+    conn = _get_conn(db_path)
+    try:
+        row = conn.execute("SELECT id FROM repos WHERE id = ?", (rid,)).fetchone()
+        if not row:
+            conn.close()
+            index_repo(project_root_abs=project_root_abs, repo_id=rid, reason="most_referenced")
+            conn = _get_conn(db_path)
+
+        # Count inbound edges per dst; normalize dst_res to rel for grouping.
+        if edge_types:
+            placeholders = ",".join("?" for _ in edge_types)
+            rows = conn.execute(
+                f"""
+                SELECT dst_res, COUNT(*) AS cnt
+                FROM edges
+                WHERE repo_id = ? AND edge_type IN ({placeholders})
+                GROUP BY dst_res
+                """,
+                (rid, *edge_types),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT dst_res, COUNT(*) AS cnt
+                FROM edges
+                WHERE repo_id = ?
+                GROUP BY dst_res
+                """,
+                (rid,),
+            ).fetchall()
+
+        # Normalize to rel path and merge counts (dst_res may be res:// or relative).
+        rel_counts: Dict[str, int] = {}
+        for r in rows:
+            dst = str(r["dst_res"] or "").strip()
+            if not dst:
+                continue
+            c_rel = _to_rel_from_res(dst)
+            if not c_rel:
+                continue
+            rel_counts[c_rel] = rel_counts.get(c_rel, 0) + int(r["cnt"])
+
+        # Sort by count descending, then filter to existing files.
+        sorted_rels = sorted(rel_counts.keys(), key=lambda x: -rel_counts[x])[: limit * 2]
+        out: List[str] = []
+        for c_rel in sorted_rels:
+            if len(out) >= limit:
+                break
+            exists = conn.execute(
+                "SELECT 1 FROM files WHERE repo_id = ? AND path_rel = ? LIMIT 1",
+                (rid, c_rel),
+            ).fetchone()
+            if not exists:
+                continue
+            out.append(_to_res_from_rel(c_rel))
+        return out
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def list_indexed_paths(
+    project_root_abs: str,
+    prefix: str = "res://",
+    max_paths: int = 500,
+    max_depth: Optional[int] = None,
+) -> List[str]:
+    """
+    Return res:// paths of files in the repo index under the given prefix.
+    max_depth: if set, limit path segments (e.g. 3 => res://a/b/c only).
+    """
+    try:
+        rid = _default_repo_id(str(Path(project_root_abs).expanduser().resolve()))
+        db_path = _db_path_for_repo_id(rid)
+        init_repo_index_db(db_path)
+        rel_prefix = _to_rel_from_res(prefix)
+        if not rel_prefix:
+            rel_prefix = ""
+        rel_prefix = rel_prefix.rstrip("/")
+        if rel_prefix:
+            rel_prefix = rel_prefix + "/"
+
+        conn = _get_conn(db_path)
+        try:
+            row = conn.execute("SELECT id FROM repos WHERE id = ?", (rid,)).fetchone()
+            if not row:
+                conn.close()
+                index_repo(project_root_abs=project_root_abs, repo_id=rid, reason="list_paths")
+                conn = _get_conn(db_path)
+
+            if rel_prefix:
+                rows = conn.execute(
+                    """
+                    SELECT path_rel FROM files
+                    WHERE repo_id = ? AND path_rel LIKE ?
+                    ORDER BY path_rel
+                    LIMIT ?
+                    """,
+                    (rid, rel_prefix + "%", max_paths),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT path_rel FROM files
+                    WHERE repo_id = ?
+                    ORDER BY path_rel
+                    LIMIT ?
+                    """,
+                    (rid, max_paths),
+                ).fetchall()
+
+            out: List[str] = []
+            for r in rows:
+                path_rel = str(r["path_rel"] or "").strip()
+                if not path_rel:
+                    continue
+                if max_depth is not None:
+                    segs = path_rel.split("/")
+                    if len(segs) > max_depth:
+                        continue
+                out.append(_to_res_from_rel(path_rel))
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return []
+
+
+def get_inbound_refs(
+    project_root_abs: str,
+    target_res_path: str,
+    limit: int = 20,
+) -> List[str]:
+    """
+    Return res:// paths of files that reference target_res_path (inbound edges).
+    """
+    try:
+        rid = _default_repo_id(str(Path(project_root_abs).expanduser().resolve()))
+        db_path = _db_path_for_repo_id(rid)
+        init_repo_index_db(db_path)
+        target_rel = _to_rel_from_res(target_res_path)
+        target_res = _to_res_from_rel(target_rel)
+
+        conn = _get_conn(db_path)
+        try:
+            row = conn.execute("SELECT id FROM repos WHERE id = ?", (rid,)).fetchone()
+            if not row:
+                conn.close()
+                index_repo(project_root_abs=project_root_abs, repo_id=rid, reason="inbound_refs")
+                conn = _get_conn(db_path)
+
+            inbound = conn.execute(
+                """
+                SELECT src_rel FROM edges
+                WHERE repo_id = ? AND (dst_res = ? OR dst_res = ?) AND src_rel != ?
+                LIMIT ?
+                """,
+                (rid, target_res, target_rel, target_rel, limit),
+            ).fetchall()
+
+            out: List[str] = []
+            for r in inbound:
+                src = str(r["src_rel"] or "").strip()
+                if src:
+                    out.append(_to_res_from_rel(src))
+            return out
+        finally:
+            conn.close()
+    except Exception:
+        return []
+

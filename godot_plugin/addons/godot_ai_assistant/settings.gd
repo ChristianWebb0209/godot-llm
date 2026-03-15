@@ -15,6 +15,7 @@ const KEY_OPENAI_BASE_URL := "openai_base_url"
 const KEY_SELECTED_MODEL := "selected_model"
 const KEY_FOLLOW_AGENT := "follow_agent"
 const KEY_ALLOW_EDITOR_ACTIONS := "allow_editor_actions"
+const KEY_AUTO_LINT_AFTER_EDIT := "auto_lint_after_edit"
 
 const DEFAULT_TEXT_SIZE := 18
 const DEFAULT_RAG_URL := "http://127.0.0.1:8000"
@@ -43,6 +44,7 @@ var openai_base_url: String = ""
 var selected_model: String = DEFAULT_MODEL
 var follow_agent: bool = true
 var allow_editor_actions: bool = true
+var auto_lint_after_edit: bool = true
 
 
 func set_editor_interface(e: EditorInterface) -> void:
@@ -68,7 +70,8 @@ func load_settings() -> void:
 	openai_base_url = cfg.get_value(CONFIG_SECTION, KEY_OPENAI_BASE_URL, "") as String
 	selected_model = cfg.get_value(CONFIG_SECTION, KEY_SELECTED_MODEL, DEFAULT_MODEL) as String
 	follow_agent = cfg.get_value(CONFIG_SECTION, KEY_FOLLOW_AGENT, true) as bool
-	allow_editor_actions = cfg.get_value(CONFIG_SECTION, KEY_ALLOW_EDITOR_ACTIONS, false) as bool
+	allow_editor_actions = cfg.get_value(CONFIG_SECTION, KEY_ALLOW_EDITOR_ACTIONS, true) as bool
+	auto_lint_after_edit = cfg.get_value(CONFIG_SECTION, KEY_AUTO_LINT_AFTER_EDIT, true) as bool
 
 
 func save_settings() -> void:
@@ -84,6 +87,7 @@ func save_settings() -> void:
 	cfg.set_value(CONFIG_SECTION, KEY_SELECTED_MODEL, selected_model)
 	cfg.set_value(CONFIG_SECTION, KEY_FOLLOW_AGENT, follow_agent)
 	cfg.set_value(CONFIG_SECTION, KEY_ALLOW_EDITOR_ACTIONS, allow_editor_actions)
+	cfg.set_value(CONFIG_SECTION, KEY_AUTO_LINT_AFTER_EDIT, auto_lint_after_edit)
 	cfg.save(_config_path)
 
 

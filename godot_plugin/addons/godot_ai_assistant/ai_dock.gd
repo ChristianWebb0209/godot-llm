@@ -3,6 +3,7 @@ extends Control
 class_name GodotAIDock
 
 const _LOG_PREFIX := "[AI Assistant] "
+const _ContextPayloadScript: GDScript = preload("res://addons/godot_ai_assistant/core/context_payload.gd")
 
 @onready var tab_container: TabContainer = $TabContainer
 @onready var chat_tab_bar: TabBar = $TabContainer/Chat/VBox/ChatTabBarRow/ChatTabBar
@@ -13,19 +14,28 @@ const _LOG_PREFIX := "[AI Assistant] "
 @onready var thought_history_list: VBoxContainer = $TabContainer/Chat/VBox/ActivityBlock/ThoughtHistoryList
 @onready var tool_calls_button: Button = $TabContainer/Chat/VBox/ActivityBlock/ToolCallsButton
 @onready var tool_calls_list: VBoxContainer = $TabContainer/Chat/VBox/ActivityBlock/ToolCallsList
-@onready var output_text_edit: RichTextLabel = $TabContainer/Chat/VBox/IOContainer/OutputText
+@onready var chat_scroll: ScrollContainer = $TabContainer/Chat/VBox/IOContainer/ChatScroll
+@onready var chat_message_list: VBoxContainer = $TabContainer/Chat/VBox/IOContainer/ChatScroll/ChatMessageList
+var output_text_edit: RichTextLabel = null  # Optional: used only when chat_message_list is missing (fallback)
 @onready var prompt_text_edit: TextEdit = $TabContainer/Chat/VBox/IOContainer/PromptTextEdit
 @onready var model_option: OptionButton = $TabContainer/Chat/VBox/BottomRow/ToolRow/ModelOption
 @onready var ask_button: Button = $TabContainer/Chat/VBox/BottomRow/ToolRow/AskButton
 @onready var copy_button: Button = $TabContainer/Chat/VBox/BottomRow/ToolRow/CopyButton
 @onready var follow_agent_check: CheckButton = $TabContainer/Chat/VBox/BottomRow/ToolRow/FollowAgentCheck
-@onready var allow_editor_actions_check: CheckButton = $TabContainer/Chat/VBox/BottomRow/ToolRow/AllowEditorActionsCheck
+@onready var context_viewer_button: Button = $TabContainer/Chat/VBox/BottomRow/ToolRow/ContextViewerButton
+@onready var io_container: VSplitContainer = $TabContainer/Chat/VBox/IOContainer
+@onready var pinned_context_row: HBoxContainer = $TabContainer/Chat/VBox/IOContainer/PinnedContextRow
+@onready var add_current_script_button: Button = $TabContainer/Chat/VBox/IOContainer/AddContextRow/AddCurrentScriptButton
+@onready var context_viewer_panel: VBoxContainer = $TabContainer/Chat/VBox/ContextViewerPanel
+@onready var context_viewer_list: VBoxContainer = $TabContainer/Chat/VBox/ContextViewerPanel/ContextViewerScroll/ContextViewerList
+@onready var context_viewer_empty_label: Label = $TabContainer/Chat/VBox/ContextViewerPanel/ContextViewerEmptyLabel
 var status_label: Label = null  # Optional: StatusLabel removed from UI
 @onready var http_request: HTTPRequest = $HTTPRequest
 @onready var history_refresh_button: Button = $TabContainer/History/Margin/HistoryVBox/HistoryTopRow/HistoryRefreshButton
 @onready var history_list: ItemList = $TabContainer/History/Margin/HistoryVBox/HistorySplit/HistoryList
 @onready var history_detail_label: RichTextLabel = $TabContainer/History/Margin/HistoryVBox/HistorySplit/HistoryDetailVBox/HistoryDetailLabel
 @onready var history_undo_button: Button = $TabContainer/History/Margin/HistoryVBox/HistorySplit/HistoryDetailVBox/HistoryUndoButton
+@onready var history_usage_label: Label = $TabContainer/History/Margin/HistoryVBox/HistoryUsageVBox/HistoryUsageLabel
 @onready var settings_text_size_spin: SpinBox = $TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/TextSizeRow/SettingsTextSizeSpin
 @onready var settings_word_wrap_check: CheckButton = $TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/SettingsWordWrapCheck
 @onready var settings_rag_url_edit: LineEdit = $TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/RagUrlRow/SettingsRagUrlEdit
@@ -57,6 +67,14 @@ var _tool_executor: GodotAIEditorToolExecutor = null
 var _settings: GodotAISettings = null
 var _edit_store: GodotAIEditStore = null
 var _decorator: GodotAIEditorDecorator = null
+var _backend_api: GodotAIBackendAPI = null
+var _tool_runner: GodotAIToolRunner = null
+var _chat_state: GodotAIChatState = null
+var _chat_renderer: GodotAIChatRenderer = null
+var _activity_state: GodotAIActivityState = null
+var _changes_tab: GodotAIChangesTab = null
+var _history_tab: GodotAIHistoryTab = null
+var _settings_tab: GodotAISettingsTab = null
 var _history_events: Array = []
 var _selected_history_edit_id: int = -1
 var _ask_icon_idle: Texture2D = null
@@ -77,7 +95,29 @@ const _SCROLL_AT_BOTTOM_THRESHOLD: float = 25.0
 var _current_activity: Dictionary = {}  # { "text": String, "started_at": float }
 var _activity_history: Array = []  # [ { "text": String, "started_at": float, "ended_at": float }, ... ]
 var _activity_glow_tween: Tween = null
+# Label at bottom of chat that shows "Thinking..." / "Tool call: X" + elapsed (updated in _process).
+var _inline_activity_label: Label = null
 
+# When user sends a new message while streaming, we increment this so the old stream's callbacks are ignored.
+var _stream_generation: int = 0
+var _stream_start_generation: int = -1
+var _stream_message_index: int = -1
+# Chat index that started the current stream; -1 if none. Used so Send/Stop reflects the selected chat.
+var _streaming_chat_index: int = -1
+
+## Typewriter reveal for assistant text (plain chars until caught up, then markdown).
+var _tw_visible: int = 0
+var _typewriter_timer: Timer = null
+var _chat_scroll_tween: Tween = null
+var _tw_active_chat_index: int = -1
+const _TYPEWRITER_CHARS_PER_TICK := 5
+
+# Last lint result (client or backend) so the next query can send it to RAG as context.
+var _last_lint_path: String = ""
+var _last_lint_output: String = ""
+# Re-run lint after edits and send follow-up until clean or cap (so we fix all errors, not just the first).
+const LINT_FOLLOW_UP_CAP := 5
+var _lint_follow_up_count_this_turn: int = 0
 
 func set_editor_interface(e: EditorInterface) -> void:
 	_editor_interface = e
@@ -87,11 +127,181 @@ func set_editor_interface(e: EditorInterface) -> void:
 	_edit_store = GodotAIEditStore.new()
 	_edit_store.load_from_disk()
 	_decorator = GodotAIEditorDecorator.new(e, _edit_store)
+	_backend_api = GodotAIBackendAPI.new(self)
+	_tool_runner = GodotAIToolRunner.new(self)
+	_chat_state = GodotAIChatState.new(self)
+	_chat_renderer = GodotAIChatRenderer.new(self)
+	_activity_state = GodotAIActivityState.new(self)
+	_changes_tab = GodotAIChangesTab.new(self)
+	_history_tab = GodotAIHistoryTab.new(self)
+	_settings_tab = GodotAISettingsTab.new(self)
 	if _editor_interface:
 		var base := _editor_interface.get_base_control()
 		if base:
 			_ask_icon_idle = base.get_theme_icon("Play", "EditorIcons")
 			_ask_icon_busy = base.get_theme_icon("Reload", "EditorIcons")
+
+
+# Public API for modules (avoids private-access errors from helper scripts)
+func get_chats() -> Array:
+	return _chats
+
+func set_chats_arr(a: Array) -> void:
+	_chats = a
+
+func get_current_chat() -> int:
+	return _current_chat
+
+func set_current_chat_index(i: int) -> void:
+	_current_chat = i
+
+func get_settings() -> GodotAISettings:
+	return _settings
+
+func get_edit_store() -> GodotAIEditStore:
+	return _edit_store
+
+func get_backend_api() -> GodotAIBackendAPI:
+	return _backend_api
+
+func get_tool_executor() -> GodotAIEditorToolExecutor:
+	return _tool_executor
+
+func get_editor_interface_ref() -> EditorInterface:
+	return _editor_interface
+
+## Ask the editor to rescan the resource filesystem so new/updated files show in the FileSystem dock.
+func request_editor_filesystem_refresh() -> void:
+	if not _editor_interface:
+		return
+	var efs = _editor_interface.get_resource_filesystem()
+	if efs and efs.has_method("scan"):
+		call_deferred("_do_editor_filesystem_scan", efs)
+
+func _do_editor_filesystem_scan(efs: EditorFileSystem) -> void:
+	if efs and is_instance_valid(efs):
+		efs.scan()
+
+func get_last_tool_prompt() -> String:
+	return _last_tool_prompt
+
+func set_last_tool_prompt(s: String) -> void:
+	_last_tool_prompt = s
+
+func get_last_tool_trigger() -> String:
+	return _last_tool_trigger
+
+func set_last_tool_trigger(s: String) -> void:
+	_last_tool_trigger = s
+
+func get_streamed_markdown() -> String:
+	return _streamed_markdown
+
+func set_streamed_markdown(s: String) -> void:
+	_streamed_markdown = s
+
+func is_streaming_in_progress() -> bool:
+	return _streaming_in_progress
+
+func get_markdown_renderer() -> GodotAIMarkdownRenderer:
+	return _markdown_renderer
+
+func get_current_activity() -> Dictionary:
+	return _current_activity
+
+func set_current_activity_dict(d: Dictionary) -> void:
+	_current_activity = d
+
+func get_activity_history() -> Array:
+	return _activity_history
+
+func set_activity_history_arr(a: Array) -> void:
+	_activity_history = a
+
+func get_activity_glow_tween() -> Tween:
+	return _activity_glow_tween
+
+func set_activity_glow_tween_ref(t: Tween) -> void:
+	_activity_glow_tween = t
+
+
+func set_inline_activity_label(l: Label) -> void:
+	_inline_activity_label = l
+
+
+func get_inline_activity_label() -> Label:
+	return _inline_activity_label
+
+func get_history_events() -> Array:
+	return _history_events
+
+func set_history_events_arr(a: Array) -> void:
+	_history_events = a
+
+func get_selected_history_edit_id() -> int:
+	return _selected_history_edit_id
+
+func set_selected_history_edit_id(i: int) -> void:
+	_selected_history_edit_id = i
+
+func get_selected_pending_id() -> String:
+	return _selected_pending_id
+
+func set_selected_pending_id_val(s: String) -> void:
+	_selected_pending_id = s
+
+func get_selected_timeline_id() -> String:
+	return _selected_timeline_id
+
+func set_selected_timeline_id_val(s: String) -> void:
+	_selected_timeline_id = s
+
+func set_status(t: String) -> void:
+	_set_status(t)
+
+func push_activity(line: String) -> void:
+	_push_activity(line)
+
+
+func clear_activity() -> void:
+	_clear_activity()
+	_set_status("")
+
+func request_backend_lint(res_path: String) -> Dictionary:
+	return await _request_backend_lint(res_path)
+
+func query_backend_for_tools(question: String, lint_output: String = "", override_file_path: String = "", override_file_text: String = "") -> Dictionary:
+	return await _query_backend_for_tools(question, lint_output, override_file_path, override_file_text)
+
+func run_editor_actions_async(tool_calls: Array, proposal_mode: bool, trigger: String = "", prompt: String = "", lint_errors_before: String = "", lint_errors_after: String = "") -> void:
+	await _run_editor_actions_async(tool_calls, proposal_mode, trigger, prompt, lint_errors_before, lint_errors_after)
+
+func post_system_message(text: String) -> void:
+	_post_system_message(text)
+
+func ensure_chat_has_messages() -> void:
+	_ensure_chat_has_messages()
+
+func render_chat_log() -> void:
+	_render_chat_log()
+
+func apply_editor_decorations() -> void:
+	_apply_editor_decorations()
+
+func escape_bbcode(t: String) -> String:
+	return _escape_bbcode(t)
+
+func query_backend_json(endpoint: String, method: int, body: String) -> Variant:
+	return await _query_backend_json(endpoint, method, body)
+
+func lint_and_autofix_return_ok(res_path: String, max_rounds: int) -> bool:
+	return await _lint_and_autofix_return_ok(res_path, max_rounds)
+
+func should_lint_path(path: String) -> bool:
+	return _should_lint_path(path)
+
+func log_edit_event_to_backend(edit_records: Array, trigger: String = "tool_action", prompt: String = "", lint_errors_before: String = "", lint_errors_after: String = "") -> void:
+	await _log_edit_event_to_backend(edit_records, trigger, prompt, lint_errors_before, lint_errors_after)
 
 
 func _set_status(t: String) -> void:
@@ -101,6 +311,12 @@ func _set_status(t: String) -> void:
 
 func _ready() -> void:
 	print("AI Assistant: _ready called on dock")
+	if _typewriter_timer == null:
+		_typewriter_timer = Timer.new()
+		_typewriter_timer.wait_time = 0.028
+		_typewriter_timer.timeout.connect(_on_typewriter_timer_timeout)
+		add_child(_typewriter_timer)
+	output_text_edit = get_node_or_null("TabContainer/Chat/VBox/IOContainer/OutputText") as RichTextLabel
 	status_label = get_node_or_null("TabContainer/Chat/VBox/BottomRow/StatusLabel") as Label
 	if output_text_edit:
 		output_text_edit.bbcode_enabled = true
@@ -116,6 +332,7 @@ func _ready() -> void:
 		print("AI Assistant: ask_button is null")
 	if prompt_text_edit:
 		prompt_text_edit.gui_input.connect(_on_prompt_text_edit_gui_input)
+		prompt_text_edit.text_changed.connect(_update_ask_button_state)
 
 	if copy_button:
 		copy_button.pressed.connect(_on_copy_button_pressed)
@@ -131,15 +348,16 @@ func _ready() -> void:
 		new_chat_button.pressed.connect(_on_new_chat_pressed)
 	if chat_tab_bar:
 		chat_tab_bar.drag_to_rearrange_enabled = true
+		chat_tab_bar.tab_close_display_policy = TabBar.CLOSE_BUTTON_SHOW_ALWAYS
 		chat_tab_bar.tab_selected.connect(_on_chat_tab_selected)
 		if chat_tab_bar.has_signal("active_tab_rearranged"):
 			chat_tab_bar.active_tab_rearranged.connect(_on_chat_tab_rearranged)
+		if chat_tab_bar.has_signal("tab_close_pressed"):
+			chat_tab_bar.tab_close_pressed.connect(_on_chat_tab_close_pressed)
 	if model_option:
 		model_option.item_selected.connect(_on_model_selected)
 	if follow_agent_check:
 		follow_agent_check.toggled.connect(_on_follow_agent_toggled)
-	if allow_editor_actions_check:
-		allow_editor_actions_check.toggled.connect(_on_allow_editor_actions_toggled)
 	if tab_container:
 		tab_container.tab_changed.connect(_on_main_tab_changed)
 		# Enable drag-to-reorder on main tabs (Chat, Edit History, Settings, Pending & Timeline)
@@ -178,13 +396,24 @@ func _ready() -> void:
 		thought_history_button.pressed.connect(_on_thought_history_toggled)
 	if tool_calls_button:
 		tool_calls_button.pressed.connect(_on_tool_calls_toggled)
+	# Activity (Thinking... / Tool call: X) is shown inline at bottom of chat, not at top.
+	if current_activity_label:
+		current_activity_label.visible = false
+	if context_viewer_button:
+		context_viewer_button.pressed.connect(_on_context_viewer_button_pressed)
+	if add_current_script_button:
+		add_current_script_button.pressed.connect(_on_add_current_script_pressed)
 
 	_apply_settings_from_config()
 	_update_context_usage_label()
-	_ensure_default_chat()
-	_refresh_settings_tab_from_config()
+	if _chat_state:
+		_chat_state.ensure_default_chat()
+	_refresh_pinned_context_row()
+	if _settings_tab:
+		_settings_tab.refresh_settings_tab_from_config()
 	_start_health_check()
-	_render_changes_tab()
+	if _changes_tab:
+		_changes_tab.render_changes_tab()
 	_start_decoration_refresh()
 	# Deferred so editor docks (FileSystem, Script, Scene) are built; then retry once after a short delay.
 	call_deferred("_apply_editor_decorations")
@@ -198,23 +427,32 @@ func _ready() -> void:
 
 func _start_decoration_refresh() -> void:
 	# The editor UI can rebuild trees/tabs; refresh markers periodically.
+	# Use one-shot + reschedule so a single "method not found" doesn't spam if script reloads.
 	if _decoration_timer != null:
 		return
 	_decoration_timer = Timer.new()
 	_decoration_timer.wait_time = 1.0
-	_decoration_timer.one_shot = false
-	_decoration_timer.autostart = true
+	_decoration_timer.one_shot = true
 	add_child(_decoration_timer)
 	_decoration_timer.timeout.connect(_on_decoration_timer_timeout)
+	_decoration_timer.start()
 
 
 func _on_decoration_timer_timeout() -> void:
 	# Only do work if we have anything to show.
 	if _edit_store == null:
+		_reschedule_decoration_timer()
 		return
 	if _edit_store.file_status.is_empty() and _edit_store.node_status.is_empty():
+		_reschedule_decoration_timer()
 		return
 	_apply_editor_decorations()
+	_reschedule_decoration_timer()
+
+
+func _reschedule_decoration_timer() -> void:
+	if _decoration_timer != null and is_instance_valid(_decoration_timer):
+		_decoration_timer.start(1.0)
 
 
 func _on_prompt_text_edit_gui_input(event: InputEvent) -> void:
@@ -229,73 +467,327 @@ func _on_prompt_text_edit_gui_input(event: InputEvent) -> void:
 func _on_ask_button_pressed() -> void:
 	print("AI Assistant: Ask button pressed")
 	_ensure_default_chat()
+	# Stop: cancel the stream for the current chat if this chat is the one streaming.
+	if _streaming_in_progress and _streaming_chat_index == _current_chat:
+		_stream_generation += 1
+		_streaming_in_progress = false
+		_streaming_chat_index = -1
+		_update_ask_button_state()
+		clear_activity()
+		_set_status("Stopped.")
+		return
 	var question: String = prompt_text_edit.text.strip_edges()
 	if question.is_empty():
 		_set_status("Please enter a question.")
 		return
 
+	# If a query is already running (another chat), supersede it so we run this one instead.
+	if _streaming_in_progress:
+		_stream_generation += 1
+
 	# Remember the originating prompt so any subsequent tool-driven edits can be logged server-side.
 	_last_tool_prompt = question
 	_last_tool_trigger = "tool_action"
+	_lint_follow_up_count_this_turn = 0
 
 	# Add user and placeholder assistant messages first, then render so user sees their message instantly.
 	_ensure_chat_has_messages()
+	var messages: Array = _chats[_current_chat]["messages"]
+	# Persist activity history to the last assistant message so inline "Thought history" has data.
+	if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
+		messages[messages.size() - 1]["activity_history"] = _activity_history.duplicate()
 	_chats[_current_chat]["messages"].append({"role": "user", "text": question})
 	_chats[_current_chat]["messages"].append({"role": "assistant", "text": ""})
 	_streamed_markdown = ""
+	_tw_visible = 0
+	_tw_active_chat_index = _current_chat
 	_save_current_chat_activity()
 	_clear_activity()
 	if thought_history_list:
 		thought_history_list.visible = false
 	_update_activity_ui()
-	_push_activity("Thinking...")
+	_push_activity("Preparing…")
 	_render_chat_log()
 	scroll_output_to_bottom()
 
-	# Clear input; response will stream in asynchronously (no status line for sending).
+	# Clear input immediately so user sees their message and empty prompt in this frame.
 	if prompt_text_edit:
 		prompt_text_edit.text = ""
 
-	var active_language := "gdscript"
-	var active_script_path := ""
-	var active_script_text := ""
-	var active_scene_path := ""
-	var project_root_abs := ProjectSettings.globalize_path("res://")
-	if _editor_interface:
-		# Prefer selected node's script; fallback to edited scene root's script.
-		var scene_root := _editor_interface.get_edited_scene_root()
-		if scene_root:
-			active_scene_path = scene_root.scene_file_path
-		var selected_script: Script = null
-		var selection := _editor_interface.get_selection() if _editor_interface else null
-		if selection:
-			var nodes := selection.get_selected_nodes()
-			if nodes and nodes.size() > 0:
-				var n: Node = nodes[0]
-				if n and n.get_script() is Script:
-					selected_script = n.get_script()
-		if selected_script == null and scene_root and scene_root.get_script() is Script:
-			selected_script = scene_root.get_script()
-		if selected_script:
-			active_script_path = selected_script.resource_path
-			# Works for GDScript; for other Script types this may be empty.
-			if "source_code" in selected_script:
-				active_script_text = selected_script.source_code
+	# Defer building context and sending so this frame can paint the user message first.
+	var use_tools: bool = true
+	call_deferred("_deferred_send_question", question, use_tools)
 
+
+func get_current_chat_exclude_context_keys() -> Array:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return []
+	return (_chats[_current_chat].get("exclude_context_keys", []) as Array).duplicate()
+
+
+## Drag-to-context: add items from editor drag data (FileSystem files, Scene tree nodes, script tabs).
+func add_pinned_context_from_drag_data(data: Variant) -> void:
+	if data == null or not data is Dictionary:
+		return
+	_ensure_chat_has_messages()
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return
+	var chat: Dictionary = _chats[_current_chat]
+	if not chat.has("pinned_context"):
+		chat["pinned_context"] = []
+	var pinned: Array = chat["pinned_context"]
+	var d: Dictionary = data
+
+	# FileSystem dock: data["files"] = PackedStringArray or Array of paths
+	if d.has("files"):
+		var files: Variant = d["files"]
+		var paths: Array = []
+		if files is PackedStringArray:
+			for i in (files as PackedStringArray).size():
+				paths.append((files as PackedStringArray)[i])
+		elif files is Array:
+			paths = (files as Array).duplicate()
+		for path in paths:
+			var p: String = str(path).strip_edges()
+			if p.is_empty():
+				continue
+			if not p.begins_with("res://"):
+				p = "res://" + p
+			var entry: Dictionary = {"type": "file", "path": p}
+			if _pinned_context_contains(pinned, entry):
+				continue
+			pinned.append(entry)
+
+	# Scene tree: data["nodes"] (array of NodePath or dicts), optional data["scene"] / "from_scene"
+	elif d.has("nodes"):
+		var nodes_raw: Variant = d["nodes"]
+		var scene_path: String = str(d.get("scene", d.get("from_scene", ""))).strip_edges()
+		if scene_path.is_empty() and _editor_interface:
+			var root = _editor_interface.get_edited_scene_root()
+			if root:
+				scene_path = root.scene_file_path
+		var root_node = _editor_interface.get_edited_scene_root() if _editor_interface else null
+		var root_name: String = root_node.name if root_node else ""
+		var node_list: Array = nodes_raw if nodes_raw is Array else []
+		for n in node_list:
+			var node_path_str: String = ""
+			var node_name_str: String = ""
+			if n is NodePath:
+				node_path_str = str(n)
+				node_name_str = (n as NodePath).get_name((n as NodePath).get_name_count() - 1)
+			elif n is Dictionary:
+				node_path_str = str((n as Dictionary).get("path", (n as Dictionary).get("node_path", "")))
+				node_name_str = str((n as Dictionary).get("name", (n as Dictionary).get("node_name", "")))
+			else:
+				node_path_str = str(n)
+			if node_path_str.is_empty():
+				continue
+			if node_name_str.is_empty():
+				node_name_str = node_path_str.get_file()
+			# Treat scene root as a special entry so we show "Scene root (scene.tscn)" not just the node name
+			var is_scene_root: bool = (
+				node_path_str == "." or node_path_str == "/"
+				or (root_name and (node_name_str == root_name or node_path_str == root_name))
+			)
+			var entry: Dictionary
+			if is_scene_root and not scene_path.is_empty():
+				entry = {"type": "scene_root", "scene_path": scene_path, "node_name": root_name if root_name else "Root"}
+			else:
+				entry = {"type": "node", "node_path": node_path_str, "node_name": node_name_str, "scene_path": scene_path}
+			if _pinned_context_contains(pinned, entry):
+				continue
+			pinned.append(entry)
+
+	# Single resource/script (e.g. script tab drag)
+	elif d.has("resource_path"):
+		var p: String = str(d.get("resource_path", "")).strip_edges()
+		if not p.is_empty():
+			if not p.begins_with("res://"):
+				p = "res://" + p
+			var entry: Dictionary = {"type": "file", "path": p}
+			if not _pinned_context_contains(pinned, entry):
+				pinned.append(entry)
+	elif d.has("script") and d["script"] != null:
+		var scr: Script = d["script"] as Script
+		if scr and scr.resource_path:
+			var p: String = scr.resource_path
+			var entry: Dictionary = {"type": "file", "path": p}
+			if not _pinned_context_contains(pinned, entry):
+				pinned.append(entry)
+
+	_refresh_pinned_context_row()
+	_set_status("Added to context for this chat.")
+
+
+func _pinned_context_contains(pinned: Array, entry: Dictionary) -> bool:
+	var path_a: String = str(entry.get("path", "")).strip_edges()
+	var node_path_a: String = str(entry.get("node_path", "")).strip_edges()
+	var scene_path_a: String = str(entry.get("scene_path", "")).strip_edges()
+	for e in pinned:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		if d.get("type") == "file" and path_a and str(d.get("path", "")).strip_edges() == path_a:
+			return true
+		if d.get("type") == "node" and node_path_a and str(d.get("node_path", "")).strip_edges() == node_path_a:
+			return true
+		if d.get("type") == "scene_root" and scene_path_a and str(d.get("scene_path", "")).strip_edges() == scene_path_a:
+			return true
+	return false
+
+
+func get_current_chat_pinned_context() -> Array:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return []
+	return (_chats[_current_chat].get("pinned_context", []) as Array).duplicate()
+
+
+func remove_pinned_context(chat_index: int, entry_index: int) -> void:
+	if chat_index < 0 or chat_index >= _chats.size():
+		return
+	var chat: Dictionary = _chats[chat_index]
+	if not chat.has("pinned_context"):
+		return
+	var pinned: Array = chat["pinned_context"]
+	if entry_index < 0 or entry_index >= pinned.size():
+		return
+	pinned.remove_at(entry_index)
+	_refresh_pinned_context_row()
+
+
+func _build_pinned_context_extra() -> Dictionary:
+	var out: Dictionary = {}
+	var pinned: Array = get_current_chat_pinned_context()
+	if pinned.is_empty():
+		return out
+	var files_arr: Array = []
+	var nodes_arr: Array = []
+	for e in pinned:
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		if d.get("type") == "file":
+			var path: String = str(d.get("path", "")).strip_edges()
+			if path.is_empty():
+				continue
+			var content: String = GodotAIContextPayload.read_file_res(path) if path else ""
+			files_arr.append({"path": path, "content": content})
+		elif d.get("type") == "scene_root":
+			var scene_path: String = str(d.get("scene_path", "")).strip_edges()
+			var node_name: String = str(d.get("node_name", "")).strip_edges()
+			var scene_file: String = scene_path.get_file() if scene_path else "scene"
+			var desc: String = "Scene root (%s)" % scene_file
+			if _editor_interface and scene_path:
+				var root = _editor_interface.get_edited_scene_root()
+				if root and root.scene_file_path == scene_path:
+					desc = "Scene root: %s (%s) — %s" % [root.name, root.get_class(), scene_file]
+			nodes_arr.append({"scene_path": scene_path, "node_path": ".", "node_name": node_name, "description": desc, "is_scene_root": true})
+		elif d.get("type") == "node":
+			var node_path_str: String = str(d.get("node_path", "")).strip_edges()
+			var node_name: String = str(d.get("node_name", "")).strip_edges()
+			var scene_path: String = str(d.get("scene_path", "")).strip_edges()
+			var desc: String = "Node: %s (path: %s)" % [node_name, node_path_str]
+			if _editor_interface and scene_path:
+				var root = _editor_interface.get_edited_scene_root()
+				if root and root.scene_file_path == scene_path:
+					var n: Node = root.get_node_or_null(node_path_str)
+					if n:
+						desc = "Node: %s (%s) path=%s" % [n.name, n.get_class(), node_path_str]
+			nodes_arr.append({"scene_path": scene_path, "node_path": node_path_str, "node_name": node_name, "description": desc})
+	if files_arr.size() > 0:
+		out["pinned_files"] = files_arr
+	if nodes_arr.size() > 0:
+		out["pinned_nodes"] = nodes_arr
+	# So the model knows these were explicitly dragged by the user
+	if files_arr.size() > 0 or nodes_arr.size() > 0:
+		out["pinned_context_note"] = "The user just dragged these items into context for this chat. Prioritize them when answering."
+	return out
+
+
+func _refresh_pinned_context_row() -> void:
+	if not pinned_context_row:
+		return
+	for c in pinned_context_row.get_children():
+		c.queue_free()
+	var pinned: Array = get_current_chat_pinned_context()
+	pinned_context_row.visible = not pinned.is_empty()
+	if pinned.is_empty():
+		return
+	var chat_idx: int = _current_chat
+	for i in range(pinned.size()):
+		var e: Variant = pinned[i]
+		if typeof(e) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = e
+		var label_text: String = ""
+		if d.get("type") == "file":
+			label_text = (str(d.get("path", "")).strip_edges() as String).get_file()
+		elif d.get("type") == "scene_root":
+			var sp: String = str(d.get("scene_path", "")).strip_edges()
+			label_text = "Scene root (%s)" % (sp.get_file() if sp else "?")
+		else:
+			label_text = "Node: " + str(d.get("node_name", "?")).strip_edges()
+		var chip_tooltip: String = "Dragged into context. Click × to remove."
+		var chip := HBoxContainer.new()
+		chip.add_theme_constant_override("separation", 4)
+		var lbl := Label.new()
+		lbl.text = label_text
+		lbl.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+		lbl.custom_minimum_size.x = 1
+		chip.add_child(lbl)
+		var rm := Button.new()
+		rm.flat = true
+		rm.text = "×"
+		rm.tooltip_text = "Remove from context"
+		lbl.tooltip_text = chip_tooltip
+		var idx := i
+		rm.pressed.connect(remove_pinned_context.bind(chat_idx, idx))
+		chip.add_child(rm)
+		pinned_context_row.add_child(chip)
+
+
+func get_current_chat_conversation_messages() -> Array:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return []
+	return _chats[_current_chat].get("messages", [])
+
+
+func _deferred_send_question(
+	question: String,
+	use_tools: bool,
+	override_file_path: String = "",
+	override_file_text: String = "",
+	lint_output_override: String = ""
+) -> void:
+	_push_activity("Building context…")
+	var conversation_messages: Array = []
+	if _current_chat >= 0 and _current_chat < _chats.size():
+		conversation_messages = _chats[_current_chat].get("messages", [])
+	var context: Dictionary = GodotAIContextPayload.build(
+		_editor_interface,
+		override_file_path,
+		override_file_text,
+		lint_output_override if not lint_output_override.is_empty() else "",
+		conversation_messages
+	)
+	var current_script: String = str(context.get("current_script", ""))
+	if not context.has("extra"):
+		context["extra"] = {}
+	if not lint_output_override.is_empty():
+		context["extra"]["lint_output"] = lint_output_override
+	elif _last_lint_path and str(current_script) == str(_last_lint_path) and not _last_lint_output.is_empty():
+		context["extra"]["lint_output"] = _last_lint_output
+	var exclude_keys: Array = get_current_chat_exclude_context_keys()
+	if exclude_keys.size() > 0:
+		context["extra"]["exclude_block_keys"] = exclude_keys
+	# Include user-dragged context (files/nodes from FileSystem, Scene tree, Script list).
+	var pinned_extra: Dictionary = _build_pinned_context_extra()
+	for k in pinned_extra:
+		context["extra"][k] = pinned_extra[k]
 	var payload: Dictionary = {
 		"question": question,
-		"context": {
-			"engine_version": Engine.get_version_info().get("string"),
-			"language": active_language,
-			"selected_node_type": "",
-			"current_script": active_script_path,
-			"extra": {
-				"active_file_text": active_script_text,
-				"active_scene_path": active_scene_path,
-				"project_root_abs": project_root_abs,
-			}
-		},
-		"top_k": 5
+		"context": context,
+		"top_k": 8
 	}
 	if _settings:
 		if _settings.openai_api_key.length() > 0:
@@ -306,15 +798,15 @@ func _on_ask_button_pressed() -> void:
 			payload["base_url"] = _settings.openai_base_url
 	var json_body: String = JSON.stringify(payload)
 	var headers: PackedStringArray = PackedStringArray(["Content-Type: application/json"])
-
-	if allow_editor_actions_check and allow_editor_actions_check.button_pressed:
-		# Stream answer then run tool_calls from trailing __TOOL_CALLS__ line.
-		_streaming_in_progress = true
-		_update_ask_button_state()
+	_stream_start_generation = _stream_generation
+	_stream_message_index = _chats[_current_chat]["messages"].size() - 1 if _current_chat >= 0 and _current_chat < _chats.size() else -1
+	_streaming_in_progress = true
+	_streaming_chat_index = _current_chat
+	_update_ask_button_state()
+	_push_activity("Calling AI…")
+	if use_tools:
 		_async_stream_request(rag_service_url + "/query_stream_with_tools", headers, json_body)
 	else:
-		_streaming_in_progress = true
-		_update_ask_button_state()
 		_async_stream_request(rag_service_url + "/query_stream", headers, json_body)
 
 
@@ -322,12 +814,16 @@ func _on_http_request_completed(result: int, response_code: int, headers: Packed
 	print("AI Assistant: HTTP request completed. result=", result, " code=", response_code)
 
 	if result != HTTPRequest.RESULT_SUCCESS:
-		_set_status("Request failed: %d" % result)
+		var msg := "Request failed: %d" % result
+		_set_status(msg)
+		_append_error_to_chat(msg)
 		_pending_http_kind = &""
 		return
 
 	if response_code < 200 or response_code >= 300:
-		_set_status("HTTP error: %d" % response_code)
+		var msg := "HTTP error: %d" % response_code
+		_set_status(msg)
+		_append_error_to_chat(msg)
 		_pending_http_kind = &""
 		return
 
@@ -337,13 +833,17 @@ func _on_http_request_completed(result: int, response_code: int, headers: Packed
 	var json := JSON.new()
 	var parse_result: int = json.parse(body_text)
 	if parse_result != OK:
-		_set_status("Failed to parse JSON response.")
+		var msg := "Failed to parse JSON response from backend."
+		_set_status(msg)
+		_append_error_to_chat(msg)
 		_pending_http_kind = &""
 		return
 
 	var data := json.data
 	if typeof(data) != TYPE_DICTIONARY:
-		_set_status("Unexpected response format.")
+		var msg := "Unexpected response format from backend."
+		_set_status(msg)
+		_append_error_to_chat(msg)
 		_pending_http_kind = &""
 		return
 
@@ -363,6 +863,8 @@ func _on_http_request_completed(result: int, response_code: int, headers: Packed
 		if typeof(usage_raw) == TYPE_DICTIONARY and _current_chat >= 0 and _current_chat < _chats.size():
 			_chats[_current_chat]["context_usage"] = usage_raw
 			_update_context_usage_label()
+			if context_viewer_panel and context_viewer_panel.visible:
+				_refresh_context_viewer_panel()
 		var tool_calls_raw = data.get("tool_calls", [])
 		_ensure_chat_has_messages()
 		var messages: Array = _chats[_current_chat]["messages"]
@@ -371,7 +873,11 @@ func _on_http_request_completed(result: int, response_code: int, headers: Packed
 		else:
 			messages.append({"role": "assistant", "text": answer})
 		_streamed_markdown = ""
+		_tw_visible = 0
+		_tw_active_chat_index = _current_chat
 		_render_chat_log()
+		if _typewriter_timer != null:
+			_typewriter_timer.start()
 		_set_status("Response received.")
 		if tool_calls_raw is Array and tool_calls_raw.size() > 0:
 			var summaries: Array = _format_tool_calls_summaries(tool_calls_raw)
@@ -379,16 +885,27 @@ func _on_http_request_completed(result: int, response_code: int, headers: Packed
 				messages[messages.size() - 1]["tool_calls_summary"] = summaries
 			_update_tool_calls_ui()
 			if _tool_executor:
-				_run_editor_actions_async(tool_calls_raw, false, "tool_action", _last_tool_prompt)
+				_run_editor_actions_then_lint_follow_up.call_deferred(tool_calls_raw, false, "tool_action", _last_tool_prompt, "", "")
+		else:
+			clear_activity()
 		return
 
 	_pending_http_kind = &""
 
 
 func _on_copy_button_pressed() -> void:
-	if not output_text_edit:
-		return
-	var text_to_copy := output_text_edit.get_parsed_text()
+	var text_to_copy: String = ""
+	if chat_message_list != null and _current_chat >= 0 and _current_chat < _chats.size():
+		var lines: PackedStringArray = []
+		for msg in _chats[_current_chat].get("messages", []):
+			if msg.get("hidden", false):
+				continue
+			var role: String = msg.get("role", "assistant")
+			var text: String = msg.get("text", "")
+			lines.append(role.capitalize() + ":\n" + text)
+		text_to_copy = "\n\n".join(lines)
+	elif output_text_edit:
+		text_to_copy = output_text_edit.get_parsed_text()
 	if text_to_copy.is_empty():
 		_set_status("Nothing to copy.")
 		return
@@ -396,119 +913,71 @@ func _on_copy_button_pressed() -> void:
 	_set_status("Copied answer to clipboard.")
 
 
+func _is_stream_cancelled() -> bool:
+	return _stream_generation != _stream_start_generation
+
+
 func _async_stream_request(endpoint: String, _headers: PackedStringArray, body: String) -> void:
-	var client := HTTPClient.new()
+	print("AI Assistant: streaming request to ", endpoint)
+	var cancel_check := Callable(self, "_is_stream_cancelled")
+	await GodotAIBackendClient.stream_post(
+		self,
+		endpoint,
+		body,
+		_on_stream_chunk,
+		_on_stream_done,
+		cancel_check
+	)
 
-	# Simple parsing for URLs like http://host:port/path
-	var host: String = ""
-	var port: int = 80
-	var use_tls := false
-	var path: String = ""
 
-	var scheme_split := endpoint.split("://")
-	var remainder := ""
-	if scheme_split.size() == 2:
-		var scheme := scheme_split[0]
-		remainder = scheme_split[1]
-		if scheme == "https":
-			use_tls = true
-			port = 443
+func _on_stream_chunk(delta: String) -> void:
+	if _stream_start_generation != _stream_generation:
+		return
+	if _streaming_chat_index < 0 or _streaming_chat_index >= _chats.size():
+		return
+	var is_first_chunk: bool = _streamed_markdown.is_empty()
+	if is_first_chunk:
+		_push_activity("Streaming response…")
+	_streamed_markdown += delta
+	_ensure_chat_has_messages()
+	var messages: Array = _chats[_streaming_chat_index]["messages"]
+	if _stream_message_index >= 0 and _stream_message_index < messages.size() and messages[_stream_message_index].get("role", "") == "assistant":
+		const TOOL_CALLS_MARKER := "\n__TOOL_CALLS__\n"
+		var marker_pos := _streamed_markdown.find(TOOL_CALLS_MARKER)
+		if marker_pos >= 0:
+			messages[_stream_message_index]["text"] = _streamed_markdown.substr(0, marker_pos)
 		else:
-			use_tls = false
-			port = 80
-	else:
-		remainder = endpoint
+			messages[_stream_message_index]["text"] = _streamed_markdown
+	if is_first_chunk:
+		_tw_visible = 0
+		if _streaming_chat_index == _current_chat:
+			_render_chat_log()
+	if _typewriter_timer != null:
+		_typewriter_timer.start()
 
-	var first_slash := remainder.find("/")
-	var host_port := ""
-	if first_slash == -1:
-		host_port = remainder
-		path = "/"
-	else:
-		host_port = remainder.substr(0, first_slash)
-		path = remainder.substr(first_slash)
 
-	var colon_index := host_port.find(":")
-	if colon_index == -1:
-		host = host_port
-	else:
-		host = host_port.substr(0, colon_index)
-		var port_str := host_port.substr(colon_index + 1)
-		port = int(port_str)
-
-	var tls_options: TLSOptions = null
-	if use_tls:
-		tls_options = TLSOptions.client()
-
-	var err := client.connect_to_host(host, port, tls_options)
-	if err != OK:
-		_set_status("Failed to connect to RAG service.")
+func _on_stream_done(full_text: String, error_message: String = "") -> void:
+	# Ignore completion from a superseded or cancelled stream (do not clear _streaming_chat_index here; another stream may be running).
+	if _stream_start_generation != _stream_generation:
 		return
-
-	_stream_http(client, path, body)
-
-
-func _stream_http(client: HTTPClient, path: String, body: String) -> void:
-	await get_tree().process_frame
-
-	while client.get_status() in [HTTPClient.STATUS_CONNECTING, HTTPClient.STATUS_RESOLVING]:
-		client.poll()
-		await get_tree().process_frame
-
-	if client.get_status() != HTTPClient.STATUS_CONNECTED:
-		_set_status("Failed to connect to RAG service.")
+	if not error_message.is_empty():
+		_set_status(error_message)
+		_append_error_to_chat(error_message)
 		_streaming_in_progress = false
 		_update_ask_button_state()
+		clear_activity()
 		return
-
-	var headers := PackedStringArray([
-		"Content-Type: application/json",
-		"Content-Length: %d" % body.to_utf8_buffer().size(),
-	])
-	client.request(HTTPClient.METHOD_POST, path, headers, body)
-
-	while client.get_status() == HTTPClient.STATUS_REQUESTING:
-		client.poll()
-		await get_tree().process_frame
-
-	if client.get_status() != HTTPClient.STATUS_BODY:
-		_set_status("Unexpected HTTP status.")
+	if full_text.is_empty():
+		_set_status("Request ended with no response. (Cancelled or connection lost.)")
 		_streaming_in_progress = false
 		_update_ask_button_state()
+		_clear_activity()
 		return
-
-	_set_status("Receiving response...")
-
-	while client.get_status() == HTTPClient.STATUS_BODY:
-		client.poll()
-		var chunk := client.read_response_body_chunk()
-		if chunk.size() == 0:
-			await get_tree().process_frame
-			continue
-		var delta := chunk.get_string_from_utf8()
-		if delta.is_empty():
-			await get_tree().process_frame
-			continue
-		if _streamed_markdown.is_empty():
-			_push_activity("Responding...")
-		_streamed_markdown += delta
-		_ensure_chat_has_messages()
-		var messages: Array = _chats[_current_chat]["messages"]
-		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-			const TOOL_CALLS_MARKER := "\n__TOOL_CALLS__\n"
-			var marker_pos := _streamed_markdown.find(TOOL_CALLS_MARKER)
-			if marker_pos >= 0:
-				messages[messages.size() - 1]["text"] = _streamed_markdown.substr(0, marker_pos)
-			else:
-				messages[messages.size() - 1]["text"] = _streamed_markdown
-		_render_chat_log()
-		await get_tree().process_frame
-
-	# Parse trailing __TOOL_CALLS__ from query_stream_with_tools; never show marker or JSON in chat.
+	_streamed_markdown = full_text
 	const TOOL_CALLS_MARKER := "\n__TOOL_CALLS__\n"
 	const USAGE_MARKER := "\n__USAGE__\n"
+	var sci: int = _streaming_chat_index if _streaming_chat_index >= 0 else _current_chat
 	var marker_pos := _streamed_markdown.find(TOOL_CALLS_MARKER)
-	print(_LOG_PREFIX + "lint/stream: TOOL_CALLS_MARKER pos=%d" % marker_pos)
 	if marker_pos >= 0:
 		var display_text := _streamed_markdown.substr(0, marker_pos)
 		var tail := _streamed_markdown.substr(marker_pos + TOOL_CALLS_MARKER.length())
@@ -518,47 +987,58 @@ func _stream_http(client: HTTPClient, path: String, body: String) -> void:
 		if usage_pos >= 0:
 			tool_calls_json = tail.substr(0, usage_pos).strip_edges()
 			usage_json = tail.substr(usage_pos + USAGE_MARKER.length()).strip_edges()
-		print(_LOG_PREFIX + "lint/stream: tool_calls_json.length=%d" % tool_calls_json.length())
 		_streamed_markdown = display_text
 		_ensure_chat_has_messages()
-		var messages: Array = _chats[_current_chat]["messages"]
-		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-			messages[messages.size() - 1]["text"] = display_text
-		if not tool_calls_json.is_empty():
-			var json := JSON.new()
-			var parse_ok := json.parse(tool_calls_json) == OK and json.data is Array
-			print(_LOG_PREFIX + "lint/stream: parse tool_calls ok=%s" % parse_ok)
-			if parse_ok and json.data is Array:
-				var tool_arr: Array = json.data
-				print(_LOG_PREFIX + "lint/stream: invoking _run_editor_actions_async with %d tool calls" % tool_arr.size())
-				var summaries: Array = _format_tool_calls_summaries(tool_arr)
-				if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-					messages[messages.size() - 1]["tool_calls_summary"] = summaries
-				_update_tool_calls_ui()
-				_run_editor_actions_async(tool_arr, false, "tool_action", _last_tool_prompt)
-		_render_chat_log()
+		if sci >= 0 and sci < _chats.size():
+			var messages: Array = _chats[sci]["messages"]
+			if _stream_message_index >= 0 and _stream_message_index < messages.size() and messages[_stream_message_index].get("role", "") == "assistant":
+				messages[_stream_message_index]["text"] = display_text
+			if not tool_calls_json.is_empty():
+				var json := JSON.new()
+				if json.parse(tool_calls_json) == OK and json.data is Array:
+					var tool_arr: Array = json.data
+					var summaries: Array = _format_tool_calls_summaries(tool_arr)
+					if _stream_message_index >= 0 and _stream_message_index < messages.size() and messages[_stream_message_index].get("role", "") == "assistant":
+						messages[_stream_message_index]["tool_calls_summary"] = summaries
+					_update_tool_calls_ui()
+					_run_editor_actions_then_lint_follow_up.call_deferred(tool_arr, false, "tool_action", _last_tool_prompt, "", "")
+			if sci == _current_chat:
+				_render_chat_log()
 		if not usage_json.is_empty():
 			var uj := JSON.new()
-			if uj.parse(usage_json) == OK and uj.data is Dictionary and _current_chat >= 0 and _current_chat < _chats.size():
-				_chats[_current_chat]["context_usage"] = uj.data
+			if uj.parse(usage_json) == OK and uj.data is Dictionary and sci >= 0 and sci < _chats.size():
+				_chats[sci]["context_usage"] = uj.data
 				_update_context_usage_label()
+				if context_viewer_panel and context_viewer_panel.visible:
+					_refresh_context_viewer_panel()
 
 	_streaming_in_progress = false
+	_streaming_chat_index = -1
 	_update_ask_button_state()
-	_set_status("Response received.")
+	clear_activity()
+	if _typewriter_timer != null:
+		_typewriter_timer.start()
 
 
 func _update_ask_button_state() -> void:
 	if not ask_button:
 		return
-	if _streaming_in_progress:
-		ask_button.disabled = true
-		if _ask_icon_busy:
-			ask_button.icon = _ask_icon_busy
-	else:
+	var prompt_empty: bool = prompt_text_edit == null or prompt_text_edit.text.strip_edges().is_empty()
+	if _streaming_in_progress and _streaming_chat_index == _current_chat:
+		# This chat is streaming: show Stop, enabled so user can cancel.
+		ask_button.text = "Stop"
+		ask_button.icon = null
 		ask_button.disabled = false
-		if _ask_icon_idle:
-			ask_button.icon = _ask_icon_idle
+	elif _streaming_in_progress:
+		# Another chat is streaming: show Send, enabled so user can send in this chat (will supersede).
+		ask_button.text = ""
+		ask_button.icon = _ask_icon_idle if _ask_icon_idle else null
+		ask_button.disabled = false
+	else:
+		# Not streaming: show Send, disabled only if prompt is empty.
+		ask_button.text = ""
+		ask_button.icon = _ask_icon_idle if _ask_icon_idle else null
+		ask_button.disabled = prompt_empty
 
 
 func _update_context_usage_label() -> void:
@@ -579,680 +1059,350 @@ func _update_context_usage_label() -> void:
 		context_usage_label.text = "Ctx: %d" % est
 
 
+func _on_context_viewer_button_pressed() -> void:
+	if not io_container or not context_viewer_panel:
+		return
+	var show_panel: bool = not context_viewer_panel.visible
+	context_viewer_panel.visible = show_panel
+	io_container.visible = not show_panel
+	if show_panel:
+		_refresh_context_viewer_panel()
+
+
+func _on_add_current_script_pressed() -> void:
+	## Add the script currently open in the Script Editor to this chat's pinned context (same as dragging the tab).
+	if not _editor_interface:
+		_set_status("No editor.")
+		return
+	var script_editor = _editor_interface.get_script_editor()
+	if not script_editor or not script_editor.has_method("get_current_script"):
+		_set_status("Script editor not available.")
+		return
+	var current: Script = script_editor.get_current_script()
+	if not current or not current.resource_path:
+		_set_status("No script open in the Script Editor.")
+		return
+	add_pinned_context_from_drag_data({"resource_path": current.resource_path})
+
+
+func _refresh_context_viewer_panel() -> void:
+	if not context_viewer_list or not context_viewer_empty_label:
+		return
+	# Clear existing block UIs
+	for child in context_viewer_list.get_children():
+		child.queue_free()
+	var usage: Dictionary = {}
+	if _current_chat >= 0 and _current_chat < _chats.size():
+		usage = _chats[_current_chat].get("context_usage", {})
+	var view_arr: Array = usage.get("context_view", [])
+	if view_arr.is_empty():
+		context_viewer_empty_label.visible = true
+		context_viewer_list.get_parent().visible = false
+		return
+	context_viewer_empty_label.visible = false
+	context_viewer_list.get_parent().visible = true
+	var exclude_keys: Array = []
+	if _current_chat >= 0 and _current_chat < _chats.size():
+		exclude_keys = _chats[_current_chat].get("exclude_context_keys", [])
+	for blk in view_arr:
+		if typeof(blk) != TYPE_DICTIONARY:
+			continue
+		var key: String = str(blk.get("key", ""))
+		var title: String = str(blk.get("title", "Context block"))
+		var est_tok: int = int(blk.get("estimated_tokens", 0))
+		var included: bool = blk.get("included", true)
+		var mode: String = str(blk.get("mode", "as_is"))
+		var preview: String = str(blk.get("content_preview", ""))
+		var user_excluded: bool = key in exclude_keys
+		var box := VBoxContainer.new()
+		box.add_theme_constant_override("separation", 4)
+		var header_row := HBoxContainer.new()
+		var header := Label.new()
+		var badge: String = "Dropped" if not included else ("Excluded by you" if user_excluded else "Included")
+		header.text = "%s  •  %d tokens  •  %s  •  %s" % [title, est_tok, badge, mode]
+		if not included:
+			header.add_theme_color_override("font_color", Color(0.6, 0.4, 0.4))
+		elif user_excluded:
+			header.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+		else:
+			header.add_theme_color_override("font_color", Color(0.4, 0.6, 0.4))
+		header.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		header.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		header_row.add_child(header)
+		var exclude_btn := Button.new()
+		exclude_btn.text = "Don't include next time" if not user_excluded else "Include again"
+		exclude_btn.pressed.connect(_toggle_exclude_context_block.bind(key))
+		header_row.add_child(exclude_btn)
+		box.add_child(header_row)
+		var body := TextEdit.new()
+		body.editable = false
+		body.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+		body.text = preview
+		body.custom_minimum_size.y = 120
+		body.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		box.add_child(body)
+		context_viewer_list.add_child(box)
+
+	# Decision log at the bottom (why blocks were included/dropped, path hints, etc.)
+	var log_arr: Array = usage.get("context_decision_log", [])
+	if not log_arr.is_empty():
+		var sep := HSeparator.new()
+		context_viewer_list.add_child(sep)
+		var log_title := Label.new()
+		log_title.text = "Context decisions"
+		log_title.add_theme_font_size_override("font_size", 14)
+		context_viewer_list.add_child(log_title)
+		var log_text := "\n".join(log_arr)
+		var log_body := TextEdit.new()
+		log_body.editable = false
+		log_body.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+		log_body.text = log_text
+		log_body.custom_minimum_size.y = 80
+		log_body.size_flags_vertical = Control.SIZE_SHRINK_BEGIN
+		context_viewer_list.add_child(log_body)
+
+
+func _toggle_exclude_context_block(block_key: String) -> void:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return
+	var chat: Dictionary = _chats[_current_chat]
+	if not chat.has("exclude_context_keys"):
+		chat["exclude_context_keys"] = []
+	var arr: Array = chat["exclude_context_keys"]
+	var idx := arr.find(block_key)
+	if idx >= 0:
+		arr.remove_at(idx)
+	else:
+		arr.append(block_key)
+	_refresh_context_viewer_panel()
+
+
 func _escape_bbcode(t: String) -> String:
-	return t.replace("[", "[[")  # RichTextLabel uses [[ for literal [
+	return GodotAIChatRenderer.escape_bbcode(t)
 
 
 func scroll_output_to_bottom() -> void:
-	if not output_text_edit:
+	_chat_renderer.scroll_output_to_bottom()
+
+
+func _deferred_smooth_scroll_chat_to_bottom() -> void:
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if chat_scroll == null:
 		return
-	output_text_edit.scroll_to_line(max(output_text_edit.get_line_count() - 1, 0))
+	var vbar: VScrollBar = chat_scroll.get_v_scroll_bar()
+	if vbar == null:
+		return
+	var target: float = vbar.max_value
+	if target <= 0.0:
+		return
+	if _chat_scroll_tween != null:
+		_chat_scroll_tween.kill()
+		_chat_scroll_tween = null
+	if abs(vbar.value - target) < 3.0:
+		vbar.value = target
+		return
+	_chat_scroll_tween = create_tween()
+	_chat_scroll_tween.set_ease(Tween.EASE_OUT).set_trans(Tween.TRANS_CUBIC)
+	_chat_scroll_tween.tween_property(vbar, "value", target, 0.2)
+
+
+func should_typewriter_assistant_at_index(idx: int) -> bool:
+	if _current_chat < 0 or _current_chat >= _chats.size():
+		return false
+	var messages: Array = _chats[_current_chat].get("messages", [])
+	if idx < 0 or idx >= messages.size():
+		return false
+	if str(messages[idx].get("role", "")) != "assistant":
+		return false
+	if idx != messages.size() - 1:
+		return false
+	var full: String = str(messages[idx].get("text", ""))
+	if full.is_empty():
+		return false
+	var streaming_here := _streaming_in_progress and _streaming_chat_index == _current_chat
+	if streaming_here:
+		return true
+	return _tw_active_chat_index == _current_chat and _tw_visible < full.length()
+
+
+func get_typewriter_plain_slice(full_text: String) -> String:
+	return full_text.substr(0, mini(_tw_visible, full_text.length()))
+
+
+func _on_typewriter_timer_timeout() -> void:
+	if _typewriter_timer == null:
+		return
+	var chat_i := _streaming_chat_index if (_streaming_in_progress and _streaming_chat_index >= 0) else _tw_active_chat_index
+	if chat_i < 0 or chat_i >= _chats.size():
+		_typewriter_timer.stop()
+		return
+	var messages: Array = _chats[chat_i].get("messages", [])
+	if messages.is_empty():
+		_typewriter_timer.stop()
+		return
+	var last_idx := messages.size() - 1
+	var last: Variant = messages[last_idx]
+	if typeof(last) != TYPE_DICTIONARY or str(last.get("role", "")) != "assistant":
+		_typewriter_timer.stop()
+		return
+	var full: String = str(last.get("text", ""))
+	var streaming_here := _streaming_in_progress and _streaming_chat_index >= 0
+	if full.is_empty():
+		return
+	_tw_visible = mini(_tw_visible + _TYPEWRITER_CHARS_PER_TICK, full.length())
+	if chat_i == _current_chat:
+		_render_chat_log()
+		scroll_output_to_bottom()
+	if not streaming_here and _tw_visible >= full.length():
+		_typewriter_timer.stop()
+		_tw_active_chat_index = -1
+		if chat_i == _current_chat:
+			_render_chat_log()
+			scroll_output_to_bottom()
 
 
 func _save_current_chat_activity() -> void:
-	if _current_chat >= 0 and _current_chat < _chats.size():
-		var c: Dictionary = _chats[_current_chat]
-		c["current_activity"] = _current_activity.duplicate()
-		c["activity_history"] = _activity_history.duplicate()
+	_activity_state.save_current_chat_activity()
 
 
 func _push_activity(line: String) -> void:
-	if line.is_empty():
-		return
-	var now := Time.get_ticks_msec() / 1000.0
-	if _current_activity.size() > 0:
-		_activity_history.append({
-			"text": _current_activity["text"],
-			"started_at": _current_activity["started_at"],
-			"ended_at": now,
-		})
-	_current_activity = {"text": line, "started_at": now}
-	_save_current_chat_activity()
-	_stop_activity_glow()
-	_update_activity_ui()
-	_start_activity_glow()
-	_render_chat_log()
+	_activity_state.push_activity(line)
 
 
 func _clear_activity() -> void:
-	var now := Time.get_ticks_msec() / 1000.0
-	if _current_activity.size() > 0:
-		_activity_history.append({
-			"text": _current_activity["text"],
-			"started_at": _current_activity["started_at"],
-			"ended_at": now,
-		})
-	_current_activity = {}
-	_save_current_chat_activity()
-	_stop_activity_glow()
-	_update_activity_ui()
-	_render_chat_log()
+	_activity_state.clear_activity()
 
 
 func _format_elapsed(sec: float) -> String:
-	if sec < 1.0:
-		return "%.1fs" % sec
-	elif sec < 60.0:
-		return "%.0fs" % sec
-	else:
-		return "%dm %.0fs" % [int(sec / 60.0), fmod(sec, 60.0)]
+	return GodotAIActivityState.format_elapsed(sec)
 
 
 func _update_activity_ui() -> void:
-	if current_activity_label:
-		if _current_activity.size() > 0:
-			current_activity_label.text = _current_activity["text"]
-			current_activity_label.visible = true
-		else:
-			current_activity_label.text = ""
-			current_activity_label.visible = false
-	if thought_history_button:
-		var n := _activity_history.size()
-		thought_history_button.visible = n > 0
-		thought_history_button.text = "Thought history (%d)" % n + (" ▼" if thought_history_list.visible else " ▶")
-	if thought_history_list:
-		for c in thought_history_list.get_children():
-			c.queue_free()
-		# Newest first; each row: "Activity text   elapsed"
-		for i in range(_activity_history.size() - 1, -1, -1):
-			var h: Dictionary = _activity_history[i]
-			var elapsed: float = float(h.get("ended_at", 0) - h.get("started_at", 0))
-			var elapsed_str := _format_elapsed(elapsed)
-			var l := Label.new()
-			l.text = "  %s   %s" % [str(h.get("text", "")), elapsed_str]
-			l.add_theme_font_size_override("font_size", 12)
-			l.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6, 1.0))
-			thought_history_list.add_child(l)
+	_activity_state.update_activity_ui()
 
 
 func _start_activity_glow() -> void:
-	if not current_activity_label or _current_activity.is_empty():
-		return
-	_stop_activity_glow()
-	_activity_glow_tween = create_tween()
-	_activity_glow_tween.set_loops()
-	_activity_glow_tween.tween_property(current_activity_label, "modulate:a", 0.65, 0.45)
-	_activity_glow_tween.tween_property(current_activity_label, "modulate:a", 1.0, 0.45)
+	_activity_state.start_activity_glow()
 
 
 func _stop_activity_glow() -> void:
-	if _activity_glow_tween:
-		_activity_glow_tween.kill()
-		_activity_glow_tween = null
-	if current_activity_label:
-		current_activity_label.modulate.a = 1.0
+	_activity_state.stop_activity_glow()
 
 
 func _on_thought_history_toggled() -> void:
 	if thought_history_list:
 		thought_history_list.visible = not thought_history_list.visible
 	if thought_history_button and _activity_history.size() > 0:
-		thought_history_button.text = "Thought history (%d)" % _activity_history.size() + (" ▼" if thought_history_list.visible else " ▶")
+		var suffix := " ▼" if thought_history_list.visible else " ▶"
+		thought_history_button.text = "Thought history (%d)" % _activity_history.size() + suffix
 
 
 func _on_tool_calls_toggled() -> void:
 	if tool_calls_list and tool_calls_button:
 		tool_calls_list.visible = not tool_calls_list.visible
-		_update_tool_calls_button_label()
+		_chat_renderer.update_tool_calls_button_label()
 
 
 func _update_tool_calls_button_label() -> void:
-	if not tool_calls_button:
-		return
-	var n := 0
-	if _current_chat >= 0 and _current_chat < _chats.size():
-		var messages: Array = _chats[_current_chat].get("messages", [])
-		for i in range(messages.size() - 1, -1, -1):
-			var msg = messages[i]
-			if typeof(msg) == TYPE_DICTIONARY and msg.get("role", "") == "assistant":
-				var summary: Array = msg.get("tool_calls_summary", [])
-				if summary.size() > 0:
-					n = summary.size()
-					break
-	tool_calls_button.text = "Tool calls (%d)" % n + (" ▼" if (tool_calls_list and tool_calls_list.visible) else " ▶")
+	_chat_renderer.update_tool_calls_button_label()
 
 
 func _update_tool_calls_ui() -> void:
-	if not tool_calls_button or not tool_calls_list:
-		return
-	var summaries: Array = []
-	if _current_chat >= 0 and _current_chat < _chats.size():
-		var messages: Array = _chats[_current_chat].get("messages", [])
-		for i in range(messages.size() - 1, -1, -1):
-			var msg = messages[i]
-			if typeof(msg) == TYPE_DICTIONARY and msg.get("role", "") == "assistant":
-				summaries = msg.get("tool_calls_summary", [])
-				break
-	if summaries.is_empty():
-		tool_calls_button.visible = false
-		tool_calls_list.visible = false
-		return
-	tool_calls_button.visible = true
-	for c in tool_calls_list.get_children():
-		c.queue_free()
-	for j in range(summaries.size()):
-		var line: String = str(summaries[j]) if j < summaries.size() else ""
-		var l := Label.new()
-		l.text = "  %d. %s" % [j + 1, line]
-		l.add_theme_font_size_override("font_size", 12)
-		l.add_theme_color_override("font_color", Color(0.55, 0.65, 0.55, 1.0))
-		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		tool_calls_list.add_child(l)
-	tool_calls_list.visible = false
-	_update_tool_calls_button_label()
+	_chat_renderer.update_tool_calls_ui()
 
 
 func _process(_delta: float) -> void:
-	# Update current activity label with live elapsed (e.g. "Thinking... 1.2s")
-	if _current_activity.is_empty() or not current_activity_label or not current_activity_label.visible:
+	if _current_activity.is_empty():
 		return
 	var elapsed: float = (Time.get_ticks_msec() / 1000.0) - float(_current_activity.get("started_at", 0.0))
-	current_activity_label.text = "%s   %s" % [_current_activity["text"], _format_elapsed(elapsed)]
+	var raw: String = _current_activity.get("text", "")
+	# Show thought trail: "Previous step → Current step   elapsed" so user sees what the bot is doing.
+	var line: String
+	if _activity_history.size() > 0:
+		var prev: Dictionary = _activity_history[_activity_history.size() - 1]
+		var prev_text: String = str(prev.get("text", "")).strip_edges()
+		if prev_text.is_empty():
+			line = "%s   %s" % [raw, _format_elapsed(elapsed)]
+		else:
+			line = "%s → %s   %s" % [prev_text, raw, _format_elapsed(elapsed)]
+	else:
+		line = "%s   %s" % [raw, _format_elapsed(elapsed)]
+	var inline := get_inline_activity_label()
+	if inline != null and is_instance_valid(inline):
+		inline.text = line
+		inline.visible = true
+	# Top label is hidden; keep it in sync for any code that still reads it, and force hidden (activity shown inline).
+	if current_activity_label and is_instance_valid(current_activity_label):
+		current_activity_label.text = line
+		current_activity_label.visible = false
 
 
 func _render_chat_log() -> void:
-	print(_LOG_PREFIX + "lint/render: _render_chat_log START")
-	if not output_text_edit:
-		print(_LOG_PREFIX + "lint/render: output_text_edit null, return")
-		return
-	_ensure_chat_has_messages()
-	var messages: Array = _chats[_current_chat]["messages"]
-	print(_LOG_PREFIX + "lint/render: messages.size=%d" % messages.size())
-	var parts: Array[String] = []
-	var width := int(output_text_edit.size.x)
-	var font_size := int(output_text_edit.get_theme_font_size("normal_font_size"))
-	if font_size <= 0:
-		font_size = 18
-	var approx_char_px := max(6.0, float(font_size) * 0.60)
-	# Cap divider to one line so it doesn't wrap when dock is narrow
-	var chars_fit := int(float(width) / approx_char_px) if width > 0 else 40
-	var divider_chars := clampi(max(24, min(chars_fit, 200)), 24, 200)
-	var divider := "─".repeat(divider_chars)
-	var idx := 0
-	for msg in messages:
-		var role: String = msg.get("role", "assistant")
-		var text: String = msg.get("text", "")
-		var is_last := idx == messages.size() - 1
-		var is_streaming_assistant := _streaming_in_progress and is_last and role == "assistant"
-		if role == "user":
-			# User: distinct block, right-aligned; neutral styling.
-			parts.append("[color=#b0b0b0][b]You[/b][/color]\n[color=#e0e0e0][right]" + _escape_bbcode(text) + "[/right][/color]")
-		else:
-			# Assistant: neutral block; show typing cursor while streaming.
-			var assistant_bb := _markdown_renderer.markdown_to_bbcode(text)
-			var cursor_bb := "[color=#c0c0c0]▌[/color]" if is_streaming_assistant else ""
-			parts.append("[color=#b0b0b0][b]Assistant[/b][/color]\n[color=#e0e0e0]" + assistant_bb + cursor_bb + "[/color]")
-		parts.append("[color=#44485588]" + divider + "[/color]\n")
-		idx += 1
-	# Activity is shown in ActivityBlock (current line + thought history dropdown), not inline.
-	var bbcode: String = "\n".join(parts)
-	print(_LOG_PREFIX + "lint/render: bbcode.length=%d" % bbcode.length())
-	var was_at_bottom: bool = _is_output_at_bottom()
-	output_text_edit.clear()
-	output_text_edit.text = bbcode
-	if was_at_bottom:
-		scroll_output_to_bottom()
-	print(_LOG_PREFIX + "lint/render: _render_chat_log DONE")
+	_chat_renderer.render_chat_log()
 
 
 func _is_output_at_bottom() -> bool:
-	if not output_text_edit:
-		return true
-	var vbar: VScrollBar = output_text_edit.get_v_scroll_bar()
-	if vbar == null:
-		return true
-	return (vbar.max_value - vbar.value) <= _SCROLL_AT_BOTTOM_THRESHOLD
+	return _chat_renderer.is_output_at_bottom()
 
 
 func _update_output_from_markdown() -> void:
 	_render_chat_log()
 
 
-## Return human-readable one-line summary per tool call for the dropdown (no raw JSON).
 func _format_tool_calls_summaries(tool_calls: Array) -> Array:
-	var out: Array = []
-	for tc in tool_calls:
-		if typeof(tc) != TYPE_DICTIONARY:
-			out.append("(invalid)")
-			continue
-		var name_key := str(tc.get("tool_name", tc.get("name", "")))
-		var args: Dictionary = tc.get("arguments", {})
-		if typeof(args) != TYPE_DICTIONARY:
-			args = {}
-		var payload := _executor_payload_from_tool_call(tc)
-		var action := str(payload.get("action", name_key))
-		var parts: Array[String] = [action]
-		if action == "write_file" or action == "apply_patch" or action == "create_file" or action == "create_script" or action == "delete_file":
-			var path_val := payload.get("path", args.get("path", ""))
-			if path_val:
-				parts.append(str(path_val))
-		elif action == "create_node":
-			var class_name_val := payload.get("class_name", args.get("class_name", ""))
-			var parent_val := payload.get("parent_path", args.get("parent_path", ""))
-			if class_name_val:
-				parts.append(str(class_name_val))
-			if parent_val:
-				parts.append(" in " + str(parent_val))
-		elif action == "set_node_property":
-			var node_val := payload.get("node_path", args.get("node_path", ""))
-			var prop_val := payload.get("property", args.get("property", ""))
-			if node_val:
-				parts.append(str(node_val))
-			if prop_val:
-				parts.append(" ." + str(prop_val))
-		elif action == "read_file" or action == "lint_file" or action == "list_directory" or action == "search_files":
-			var path_val := payload.get("path", args.get("path", ""))
-			if path_val:
-				parts.append(str(path_val))
-		out.append(" ".join(parts))
-	return out
+	return GodotAIToolRunner.format_tool_calls_summaries(tool_calls, self)
 
-
-## Build the payload the executor expects. Backend sends { tool_name, arguments, output }.
-## If output has execute_on_client we use it; else we build from tool_name + arguments so no tool call is dropped.
-func _executor_payload_from_tool_call(tc: Dictionary) -> Dictionary:
-	var out = tc.get("output", null)
-	if typeof(out) == TYPE_DICTIONARY and out.get("execute_on_client", false):
-		return out
-	var name_key := tc.get("tool_name", "")
-	if name_key.is_empty():
-		name_key = tc.get("name", "")
-	var args: Dictionary = tc.get("arguments", {})
-	if typeof(args) != TYPE_DICTIONARY:
-		args = {}
-	var payload: Dictionary = {
-		"execute_on_client": true,
-		"action": str(name_key),
-	}
-	for k in args:
-		payload[k] = args[k]
-	return payload
-
-
-const _MAX_TOOL_CALLS_PER_RESPONSE := 20  # Avoid editor crash from too many actions in one go
 
 func _run_editor_actions_async(tool_calls: Array, proposal_mode: bool, trigger: String = "", prompt: String = "", lint_errors_before: String = "", lint_errors_after: String = "") -> void:
-	print(_LOG_PREFIX + "lint/actions: _run_editor_actions_async START, tool_calls.size=%d" % tool_calls.size())
-	var results: Array[String] = []
-	var display_changes: Array = []  # { action_type, summary, message } for chat + timeline
-	if _tool_executor:
-		_tool_executor.set_follow_agent(follow_agent_check.button_pressed if follow_agent_check else false)
-	var edit_records: Array = []  # file-only, for backend
-	var effective_trigger := trigger if not trigger.is_empty() else _last_tool_trigger
-	var effective_prompt := prompt if not prompt.is_empty() else _last_tool_prompt
-	var effective_lint_before := lint_errors_before.strip_edges()
-	var effective_lint_after := lint_errors_after.strip_edges()
-	var total := tool_calls.size()
-	var skipped := 0
-	if total > _MAX_TOOL_CALLS_PER_RESPONSE:
-		skipped = total - _MAX_TOOL_CALLS_PER_RESPONSE
-		tool_calls = tool_calls.slice(0, _MAX_TOOL_CALLS_PER_RESPONSE)
-	var tree := get_tree()
-	for tc in tool_calls:
-		if typeof(tc) != TYPE_DICTIONARY:
-			continue
-		var out := _executor_payload_from_tool_call(tc)
-		if out.is_empty() or not out.get("execute_on_client", false):
-			continue
-		var action: String = str(out.get("action", ""))
-		if action.is_empty():
-			continue
-		_push_activity("Using tool: %s" % action)
-		# File edits: apply immediately (staged like Cursor); show in timeline with green/red in editor; user can Revert if needed.
-		if action in ["create_file", "write_file", "apply_patch", "create_script", "delete_file"]:
-			if action in ["create_file", "write_file"] and str(out.get("content", "")).strip_edges().length() < 10:
-				results.append("Error: %s had no or empty content (model did not generate the file). Review the answer and ask again." % action)
-				continue
-			_set_status("Applying: %s..." % str(out.get("path", action)))
-			var file_result: Dictionary = await _tool_executor.execute_async(out)
-			var msg := file_result.get("message", "OK") if file_result.get("success", false) else ("Error: %s" % file_result.get("message", "unknown"))
-			results.append(msg)
-			var rec2 = file_result.get("edit_record", null)
-			if rec2 != null and rec2 is Dictionary:
-				var rec_dict: Dictionary = rec2
-				edit_records.append(rec_dict)
-				var path := str(rec_dict.get("file_path", ""))
-				var lint_ok := true
-				if file_result.get("success", false) and _should_lint_path(path):
-					_push_activity("Linting: %s" % path)
-					_set_status("Linting: %s..." % path)
-					lint_ok = await _lint_and_autofix_return_ok(path, 5)
-				display_changes.append({
-					"action_type": rec_dict.get("action_type", action),
-					"summary": rec_dict.get("summary", msg),
-					"message": msg,
-					"file_path": path,
-					"lint_ok": lint_ok,
-				})
-				if _edit_store:
-					_edit_store.add_applied_file_change(rec_dict, lint_ok, str(rec_dict.get("action_type", "")))
-			continue
-
-		# modify_attribute: routes to node property or import option; result has edit_record for either.
-		if action == "modify_attribute":
-			_set_status("Applying: %s..." % action)
-			var mod_result: Dictionary = await _tool_executor.execute_async(out)
-			var mod_msg := mod_result.get("message", "OK") if mod_result.get("success", false) else ("Error: %s" % mod_result.get("message", "unknown"))
-			results.append(mod_msg)
-			var mod_rec = mod_result.get("edit_record", null)
-			if mod_rec != null and mod_rec is Dictionary:
-				var mr: Dictionary = mod_rec
-				display_changes.append({
-					"action_type": mr.get("action_type", action),
-					"summary": mr.get("summary", mod_msg),
-					"message": mod_msg,
-				})
-				# Import: file_path present -> file edit (timeline, revert, lint)
-				if mr.has("file_path"):
-					edit_records.append(mr)
-					var path := str(mr.get("file_path", ""))
-					var lint_ok := true
-					if mod_result.get("success", false) and _should_lint_path(path):
-						_push_activity("Linting: %s" % path)
-						lint_ok = await _lint_and_autofix_return_ok(path, 5)
-					display_changes[display_changes.size() - 1]["file_path"] = path
-					display_changes[display_changes.size() - 1]["lint_ok"] = lint_ok
-					if _edit_store:
-						_edit_store.add_applied_file_change(mr, lint_ok, str(mr.get("action_type", "")))
-				# Node: scene_path present -> node change
-				elif mr.has("scene_path") and _edit_store and mod_result.get("success", false):
-					var scene_path := str(mr.get("scene_path", ""))
-					var node_path := str(mr.get("node_path", ""))
-					var status := "modified"
-					if str(mr.get("action_type", "")) == "create_node":
-						status = "created"
-					_edit_store.add_node_change(scene_path, node_path, status, str(mr.get("summary", mod_msg)), str(mr.get("action_type", "")))
-			continue
-
-		# Other editor tools: read_file, list_directory, list_files, search_files, read_import_options, lint_file, create_node.
-		# lint_file: run via backend so we never spawn Godot from inside the editor (crashes).
-		print(_LOG_PREFIX + "lint/actions: running tool action=%s" % action)
-		_set_status("Running: %s..." % action)
-		var result: Dictionary
-		if action == "lint_file":
-			var path_for_lint := str(out.get("path", ""))
-			result = await _request_backend_lint(path_for_lint)
-		else:
-			result = await _tool_executor.execute_async(out)
-		print(_LOG_PREFIX + "lint/actions: tool action=%s returned, success=%s" % [action, result.get("success", false)])
-		var node_msg := result.get("message", "OK") if result.get("success", false) else ("Error: %s" % result.get("message", "unknown"))
-		results.append(node_msg)
-		if action == "lint_file":
-			print(_LOG_PREFIX + "lint/actions: handling lint_file result")
-			var lint_out := str(result.get("output", "")).strip_edges()
-			print(_LOG_PREFIX + "lint/actions: lint_file output length=%d" % lint_out.length())
-			if not lint_out.is_empty():
-				# Use concatenation so lint output (which may contain %) does not break format strings
-				print(_LOG_PREFIX + "lint/actions: appending lint_file to display_changes")
-				display_changes.append({
-					"action_type": "lint_file",
-					"summary": "Lint: %s" % str(out.get("path", "")),
-					"message": "```\n" + lint_out + "\n```",
-				})
-				print(_LOG_PREFIX + "lint/actions: display_changes.size=%d" % display_changes.size())
-		var node_rec = result.get("edit_record", null)
-		if node_rec != null and node_rec is Dictionary:
-			var nr: Dictionary = node_rec
-			display_changes.append({
-				"action_type": nr.get("action_type", action),
-				"summary": nr.get("summary", node_msg),
-				"message": node_msg,
-			})
-			if _edit_store and result.get("success", false):
-				var scene_path := str(nr.get("scene_path", ""))
-				var node_path := str(nr.get("node_path", ""))
-				var status := "modified"
-				if str(nr.get("action_type", "")) == "create_node":
-					status = "created"
-				_edit_store.add_node_change(scene_path, node_path, status, str(nr.get("summary", node_msg)), str(nr.get("action_type", "")))
-
-	if edit_records.size() > 0:
-		await _log_edit_event_to_backend(edit_records, effective_trigger, effective_prompt, effective_lint_before, effective_lint_after)
-	if skipped > 0:
-		_ensure_chat_has_messages()
-		var messages: Array = _chats[_current_chat]["messages"]
-		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-			messages[messages.size() - 1]["text"] += "\n\n_Skipped %d tool call(s) to avoid overload. Ask for fewer changes at a time._" % skipped
-		_render_chat_log()
-	if display_changes.size() > 0:
-		_set_status("Editor actions: %d change(s)" % display_changes.size())
-		var section: String = _format_editor_actions_chat_section(display_changes)
-		_ensure_chat_has_messages()
-		var messages: Array = _chats[_current_chat]["messages"]
-		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-			messages[messages.size() - 1]["text"] += section
-		_render_chat_log()
-	else:
-		_set_status("Response received.")
-
-	# Defer so chat is visible first; if changes/decorations crash (e.g. broken scripts), user still sees the result
-	print(_LOG_PREFIX + "lint/actions: about to call_deferred _render_changes_tab")
-	call_deferred("_render_changes_tab")
-	print(_LOG_PREFIX + "lint/actions: about to call_deferred _apply_editor_decorations")
-	call_deferred("_apply_editor_decorations")
-	print(_LOG_PREFIX + "lint/actions: _run_editor_actions_async finished (deferred calls queued)")
-
-	# Changes are applied immediately; user can revert from Pending & Timeline tab if needed.
-
-
-func _format_editor_actions_chat_section(display_changes: Array) -> String:
-	print(_LOG_PREFIX + "lint/format: _format_editor_actions_chat_section START size=%d" % display_changes.size())
-	if display_changes.is_empty():
-		print(_LOG_PREFIX + "lint/format: display_changes empty, return")
-		return ""
-	var lines: PackedStringArray = []
-	lines.append("")
-	lines.append("**Editor actions**")
-	lines.append("")
-	for i in range(display_changes.size()):
-		var c = display_changes[i]
-		if typeof(c) != TYPE_DICTIONARY:
-			continue
-		var action_type := str(c.get("action_type", ""))
-		print(_LOG_PREFIX + "lint/format: change[%d] action_type=%s" % [i, action_type])
-		var summary := str(c.get("summary", c.get("message", "")))
-		var icon := GodotAIEditStore.get_action_icon(action_type)
-		var label := GodotAIEditStore.get_action_label(action_type)
-		var lint_note := ""
-		if c.has("lint_ok") and _should_lint_path(str(c.get("file_path", ""))):
-			lint_note = " (Lint: %s)" % ("passed" if c.get("lint_ok", true) else "failed")
-		# Use concatenation so summary/message (paths, lint output) never break format strings
-		lines.append("- " + icon + " **" + label + "**: " + summary + lint_note)
-		if action_type == "lint_file" and c.has("message"):
-			var msg := str(c.get("message", ""))
-			print(_LOG_PREFIX + "lint/format: appending lint_file message length=%d" % msg.length())
-			lines.append(msg)
-	lines.append("")
-	var result := "\n".join(lines)
-	print(_LOG_PREFIX + "lint/format: _format_editor_actions_chat_section DONE result.length=%d" % result.length())
-	return result
+	await _tool_runner.run_editor_actions_async(tool_calls, proposal_mode, trigger, prompt, lint_errors_before, lint_errors_after)
 
 
 func _render_changes_tab() -> void:
-	print(_LOG_PREFIX + "lint/tab: _render_changes_tab START (deferred)")
-	if _edit_store == null:
-		print(_LOG_PREFIX + "lint/tab: _edit_store null, return")
-		return
-	if pending_list:
-		pending_list.clear()
-		_selected_pending_id = ""
-		for p in _edit_store.pending:
-			if typeof(p) != TYPE_DICTIONARY:
-				continue
-			var action_type := str(p.get("action_type", ""))
-			var icon := GodotAIEditStore.get_action_icon(action_type)
-			var label := "%s %s" % [icon, str(p.get("summary", ""))]
-			pending_list.add_item(label)
-	if timeline_list:
-		timeline_list.clear()
-		_selected_timeline_id = ""
-		for e in _edit_store.events:
-			if typeof(e) != TYPE_DICTIONARY:
-				continue
-			var action_type := str(e.get("action_type", ""))
-			var icon := GodotAIEditStore.get_action_icon(action_type)
-			var summary := str(e.get("summary", ""))
-			var label := "%s %s" % [icon, summary]
-			timeline_list.add_item(label)
-	_show_diff("", "")
-	print(_LOG_PREFIX + "lint/tab: _render_changes_tab DONE")
+	if _changes_tab:
+		_changes_tab.render_changes_tab()
 
 
 func _show_diff(old_content: String, new_content: String) -> void:
-	var old_te: TextEdit = diff_old_text if diff_old_text else get_node_or_null("TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox/DiffSplit/OldText") as TextEdit
-	var new_te: TextEdit = diff_new_text if diff_new_text else get_node_or_null("TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox/DiffSplit/NewText") as TextEdit
-	if old_te:
-		old_te.text = old_content
-		old_te.scroll_vertical = 0
-		old_te.queue_redraw()
-	if new_te:
-		new_te.text = new_content
-		new_te.scroll_vertical = 0
-		new_te.queue_redraw()
+	_changes_tab.show_diff(old_content, new_content)
 
 
 func _on_pending_item_selected(index: int) -> void:
-	if _edit_store == null:
-		return
-	if index < 0 or index >= _edit_store.pending.size():
-		return
-	var p = _edit_store.pending[index]
-	if typeof(p) != TYPE_DICTIONARY:
-		return
-	_selected_pending_id = str(p.get("id", ""))
-	_show_diff(str(p.get("old_content", "")), str(p.get("new_content", "")))
+	_changes_tab.on_pending_item_selected(index)
 
 
 func _on_revert_selected_pressed() -> void:
-	if _edit_store == null or _tool_executor == null:
-		return
-	if _selected_timeline_id.is_empty():
-		_set_status("Select a file change in the timeline to revert.")
-		return
-	var info = _edit_store.get_revert_info(_selected_timeline_id)
-	if info.is_empty():
-		_set_status("Selected item cannot be reverted (not a file edit or no previous content).")
-		return
-	var path := str(info.get("file_path", ""))
-	var old_content := str(info.get("old_content", ""))
-	_set_status("Reverting: %s..." % path)
-	var result: Dictionary = _tool_executor.execute({
-		"execute_on_client": true,
-		"action": "write_file",
-		"path": path,
-		"content": old_content,
-	})
-	if result.get("success", false):
-		_edit_store.clear_file_status(path)
-		_set_status("Reverted: %s" % path)
-	else:
-		_set_status("Revert failed: %s" % result.get("message", "unknown"))
-	_render_changes_tab()
-	_apply_editor_decorations()
+	_changes_tab.on_revert_selected_pressed()
 
 
 func _on_timeline_item_selected(index: int) -> void:
-	if _edit_store == null:
-		return
-	if index < 0 or index >= _edit_store.events.size():
-		return
-	var e = _edit_store.events[index]
-	if typeof(e) != TYPE_DICTIONARY:
-		return
-	_selected_timeline_id = str(e.get("id", ""))
-	if str(e.get("kind", "")) == "file":
-		_show_diff(str(e.get("old_content", "")), str(e.get("new_content", "")))
-	else:
-		_show_diff("", "")
+	_changes_tab.on_timeline_item_selected(index)
 
 
 func _read_text_res(path: String) -> String:
-	if path.is_empty():
-		return ""
-	var p := path
-	if p.begins_with("res://"):
-		p = p.substr("res://".length())
-	var abs := ProjectSettings.globalize_path("res://").path_join(p)
-	if not FileAccess.file_exists(abs):
-		return ""
-	var f := FileAccess.open(abs, FileAccess.READ)
-	if f == null:
-		return ""
-	var txt := f.get_as_text()
-	f.close()
-	return txt
+	return GodotAIServerLint.read_text_res(path)
 
 
 func _post_lint_fix_to_backend(file_path: String, lint_output: String, old_content: String, new_content: String, prompt: String) -> void:
-	var endpoint := rag_service_url + "/lint_memory/record_fix"
-	var payload: Dictionary = {
-		"project_root_abs": ProjectSettings.globalize_path("res://"),
-		"file_path": file_path,
-		"engine_version": Engine.get_version_info().get("string"),
-		"raw_lint_output": lint_output,
-		"old_content": old_content,
-		"new_content": new_content,
-		"prompt": prompt,
-	}
-	var body := JSON.stringify(payload)
-	await _query_backend_json(endpoint, HTTPClient.METHOD_POST, body)
+	await _backend_api.post_lint_fix_to_backend(file_path, lint_output, old_content, new_content, prompt)
 
 
 func _lint_and_autofix_return_ok(res_path: String, max_rounds: int) -> bool:
-	print(_LOG_PREFIX + "lint/autofix: _lint_and_autofix_return_ok START res_path=%s max_rounds=%d" % [res_path, max_rounds])
-	var project_dir := ProjectSettings.globalize_path("res://")
-	var rel_path := res_path
-	if rel_path.begins_with("res://"):
-		rel_path = rel_path.substr("res://".length())
+	return await GodotAILintAutofix.lint_and_autofix_return_ok(self, res_path, max_rounds)
 
-	var original_before_any_fix := _read_text_res(res_path)
-	var first_failure_output := ""
 
-	for attempt in range(max_rounds):
-		print(_LOG_PREFIX + "lint/autofix: attempt %d/%d" % [attempt + 1, max_rounds])
-		var lint := await _run_headless_lint(project_dir, rel_path)
-		var ok: bool = lint.get("ok", false)
-		if ok:
-			print(_LOG_PREFIX + "lint/autofix: lint passed, return true")
-			if not first_failure_output.is_empty():
-				var final_after := _read_text_res(res_path)
-				if not final_after.is_empty() and final_after != original_before_any_fix:
-					await _post_lint_fix_to_backend(res_path, first_failure_output, original_before_any_fix, final_after, _last_tool_prompt)
-			return true
-		var lint_output: String = str(lint.get("output", "")).strip_edges()
-		if lint_output.is_empty():
-			lint_output = "Lint failed but produced no output."
-		if first_failure_output.is_empty():
-			first_failure_output = lint_output
-		_push_activity("Fixing lint errors (attempt %d/%d)..." % [attempt + 1, max_rounds])
-		var fix_question := (
-			"Fix the lint errors in this file and only change what is necessary.\n"
-			+ "File: %s\n"
-			+ "Project root: res://\n"
-			+ "Lint output:\n%s\n\n"
-			+ "Use editor tools (apply_patch or write_file) to update the file.\n"
-			+ "After making edits, assume lint will be rerun; keep iterating until it passes."
-		) % [res_path, lint_output]
-		var file_content := _read_text_res(res_path)
-		print(_LOG_PREFIX + "lint/autofix: calling _query_backend_for_tools for fix")
-		var fix_resp := await _query_backend_for_tools(fix_question, lint_output, res_path, file_content)
-		print(_LOG_PREFIX + "lint/autofix: _query_backend_for_tools returned")
-		var tool_calls := fix_resp.get("tool_calls", [])
-		if tool_calls is Array and tool_calls.size() > 0 and _tool_executor:
-			print(_LOG_PREFIX + "lint/autofix: calling _run_editor_actions_async for fix, tool_calls.size=%d" % tool_calls.size())
-			await _run_editor_actions_async(tool_calls, false, "lint_fix", fix_question, lint_output, "")
-			print(_LOG_PREFIX + "lint/autofix: _run_editor_actions_async returned")
-		else:
-			_post_system_message(
-				("Auto-lint failed on %s (attempt %d/%d), but the backend did not return any tool calls to fix it.\n\nLint output:\n%s")
-				% [res_path, attempt + 1, max_rounds, lint_output]
-			)
-			return false
-	print(_LOG_PREFIX + "lint/autofix: max_rounds reached, running final lint")
-	var final_lint := await _run_headless_lint(project_dir, rel_path)
-	var final_ok := bool(final_lint.get("ok", false))
-	print(_LOG_PREFIX + "lint/autofix: _lint_and_autofix_return_ok DONE return %s" % final_ok)
-	return final_ok
+## Single-shot lint: run lint once (local then backend if needed). If fail, set result and send at most one follow-up. No loop. Fast.
+func lint_once_then_maybe_one_follow_up(res_path: String) -> bool:
+	return await _lint_once_then_maybe_one_follow_up(res_path)
+
+
+func _lint_once_then_maybe_one_follow_up(res_path: String) -> bool:
+	var lint := await GodotAIServerLint.run_lint(self, res_path)
+	var ok := lint.get("ok", false)
+	var out := str(lint.get("output", "")).strip_edges()
+	set_last_lint_result(res_path, out)
+	_set_status(GodotAIServerLint.format_lint_summary(ok, out))
+	return ok
 
 
 func _apply_editor_decorations() -> void:
@@ -1261,130 +1411,81 @@ func _apply_editor_decorations() -> void:
 
 
 func _log_edit_event_to_backend(edit_records: Array, trigger: String = "tool_action", prompt: String = "", lint_errors_before: String = "", lint_errors_after: String = "") -> void:
-	var endpoint := rag_service_url + "/edit_events/create"
-	var changes: Array = []
-	for r in edit_records:
-		if typeof(r) != TYPE_DICTIONARY:
-			continue
-		changes.append({
-			"file_path": str(r.get("file_path", "")),
-			"change_type": str(r.get("change_type", "modify")),
-			"old_content": str(r.get("old_content", "")),
-			"new_content": str(r.get("new_content", "")),
-		})
-	if changes.is_empty():
-		return
-
-	var summary := "Edited %d file(s)" % changes.size()
-	if changes.size() == 1:
-		summary = "%s %s" % [str(changes[0].get("change_type", "modify")), str(changes[0].get("file_path", ""))]
-
-	var payload: Dictionary = {
-		"actor": "ai",
-		"trigger": trigger if not trigger.is_empty() else "tool_action",
-		"summary": summary,
-		"changes": changes,
-	}
-	if not prompt.is_empty():
-		payload["prompt"] = prompt
-	if not lint_errors_before.is_empty():
-		payload["lint_errors_before"] = lint_errors_before
-	if not lint_errors_after.is_empty():
-		payload["lint_errors_after"] = lint_errors_after
-	var body := JSON.stringify(payload)
-
-	var client := HTTPClient.new()
-	var scheme_split := endpoint.split("://")
-	var remainder := scheme_split[1] if scheme_split.size() == 2 else endpoint
-	var first_slash := remainder.find("/")
-	var host_port := remainder if first_slash == -1 else remainder.substr(0, first_slash)
-	var path := "/" if first_slash == -1 else remainder.substr(first_slash)
-	var host := host_port
-	var port := 80
-	var colon_index := host_port.find(":")
-	if colon_index != -1:
-		host = host_port.substr(0, colon_index)
-		port = int(host_port.substr(colon_index + 1))
-
-	var err := client.connect_to_host(host, port)
-	if err != OK:
-		return
-	while client.get_status() in [HTTPClient.STATUS_CONNECTING, HTTPClient.STATUS_RESOLVING]:
-		client.poll()
-		await get_tree().process_frame
-	if client.get_status() != HTTPClient.STATUS_CONNECTED:
-		return
-
-	var headers := PackedStringArray([
-		"Content-Type: application/json",
-		"Content-Length: %d" % body.to_utf8_buffer().size()
-	])
-	client.request(HTTPClient.METHOD_POST, path, headers, body)
-	# Fire-and-forget; consume response so the connection completes.
-	while client.get_status() in [HTTPClient.STATUS_REQUESTING, HTTPClient.STATUS_BODY]:
-		client.poll()
-		client.read_response_body_chunk()
-		await get_tree().process_frame
+	await _backend_api.log_edit_event_to_backend(edit_records, trigger, prompt, lint_errors_before, lint_errors_after)
 
 
 func _should_lint_path(path: String) -> bool:
-	var p := path.to_lower()
-	return p.ends_with(".gd") or p.ends_with(".cs") or p.ends_with(".gdshader")
+	return GodotAIServerLint.should_lint_path(path)
 
 
 func _lint_and_autofix(res_path: String, max_rounds: int) -> void:
-	# Lint runs via backend POST /lint. Then asks the backend to fix any lint output and retries.
-	var project_dir := ProjectSettings.globalize_path("res://")
-	var rel_path := res_path
-	if rel_path.begins_with("res://"):
-		rel_path = rel_path.substr("res://".length())
-
-	for attempt in range(max_rounds):
-		var lint := await _run_headless_lint(project_dir, rel_path)
-		var ok: bool = lint.get("ok", false)
-		if ok:
-			return
-
-		var lint_output: String = str(lint.get("output", "")).strip_edges()
-		if lint_output.is_empty():
-			lint_output = "Lint failed but produced no output."
-
-		# Ask backend to fix this file to satisfy the linter.
-		_push_activity("Fixing lint errors (attempt %d/%d)..." % [attempt + 1, max_rounds])
-		var fix_question := (
-			"Fix the lint errors in this file and only change what is necessary.\n"
-			+ "File: %s\n"
-			+ "Project root: res://\n"
-			+ "Lint output:\n%s\n\n"
-			+ "Use editor tools (apply_patch or write_file) to update the file.\n"
-			+ "After making edits, assume lint will be rerun; keep iterating until it passes."
-		) % [res_path, lint_output]
-		var file_content := _read_text_res(res_path)
-		var fix_resp := await _query_backend_for_tools(fix_question, lint_output, res_path, file_content)
-		var tool_calls := fix_resp.get("tool_calls", [])
-		if tool_calls is Array and tool_calls.size() > 0 and _tool_executor:
-			await _run_editor_actions_async(tool_calls, false, "lint_fix", fix_question, lint_output, "")
-		else:
-			_post_system_message(
-				("Auto-lint failed on %s (attempt %d/%d), but the backend did not return any tool calls to fix it.\n\nLint output:\n%s")
-				% [res_path, attempt + 1, max_rounds, lint_output]
-			)
-			return
-
-	# If we get here, we tried max_rounds and still failed.
-	var final_lint := await _run_headless_lint(project_dir, rel_path)
-	var final_output: String = str(final_lint.get("output", "")).strip_edges()
-	_post_system_message(
-		("Gave up after %d auto-fix attempts; lint is still failing for %s.\n\nLast lint output:\n%s")
-		% [max_rounds, res_path, final_output]
-	)
+	await GodotAILintAutofix.lint_and_autofix(self, res_path, max_rounds)
 
 
-## Lint via backend (POST /lint). Avoids spawning Godot from inside the editor, which can crash it.
+## Store last lint result so the next query sends it to RAG (context.extra.lint_output).
+func set_last_lint_result(res_path: String, output: String) -> void:
+	_last_lint_path = res_path
+	_last_lint_output = output
+
+
+func get_last_lint_path() -> String:
+	return _last_lint_path
+
+
+func get_last_lint_output() -> String:
+	return _last_lint_output
+
+
+func _run_editor_actions_then_lint_follow_up(
+	tool_calls: Array,
+	proposal_mode: bool,
+	trigger: String = "",
+	prompt: String = "",
+	lint_errors_before: String = "",
+	lint_errors_after: String = ""
+) -> void:
+	await _run_editor_actions_async(tool_calls, proposal_mode, trigger, prompt, lint_errors_before, lint_errors_after)
+
+
+## Called by tool_runner when an edited file still has lint errors. Sends a follow-up request so the model fixes remaining errors (repeats until clean or LINT_FOLLOW_UP_CAP).
+func send_lint_fix_follow_up(res_path: String, lint_output: String) -> void:
+	if res_path.is_empty() or lint_output.is_empty():
+		return
+	if _lint_follow_up_count_this_turn >= LINT_FOLLOW_UP_CAP:
+		return
+	# Tools are always on; no check needed.
+	_lint_follow_up_count_this_turn += 1
+	set_last_lint_result(res_path, lint_output)
+	_ensure_chat_has_messages()
+	# Add a hidden user message so backend has thread context; UI never shows it (silent lint follow-up).
+	var follow_up_msg := "Fix the remaining errors in this file."
+	if _lint_follow_up_count_this_turn > 1:
+		follow_up_msg = "Fix the remaining errors (round %d)." % _lint_follow_up_count_this_turn
+	_chats[_current_chat]["messages"].append({"role": "user", "text": follow_up_msg, "hidden": true})
+	_chats[_current_chat]["messages"].append({"role": "assistant", "text": ""})
+	_tw_visible = 0
+	_tw_active_chat_index = _current_chat
+	_render_chat_log()
+	scroll_output_to_bottom()
+	call_deferred("_deferred_send_question", "Fix the remaining lint errors in this file.", true, res_path, "", lint_output)
+
+
+## Lint: local (editor) first via GodotAIServerLint.run_lint; backend when available, else same-engine subprocess so we always get real error text.
 func _request_backend_lint(res_path: String) -> Dictionary:
 	var base := (rag_service_url as String).strip_edges().trim_suffix("/")
 	if base.is_empty():
-		return {"success": false, "message": "Lint requires the RAG backend. Start it (e.g. run_backend.ps1) and set the backend URL in Settings.", "path": res_path, "output": "", "exit_code": -1}
+		# No backend: run Godot --script path --check-only in a subprocess and capture output (same as backend would do).
+		var sub := GodotAIServerLint.run_lint_via_godot_subprocess(res_path)
+		var out_text := str(sub.get("output", "")).strip_edges()
+		set_last_lint_result(res_path, out_text)
+		var ok := bool(sub.get("success", false))
+		return {
+			"success": ok,
+			"message": "Lint passed" if ok else "Lint reported issues",
+			"path": res_path,
+			"output": out_text,
+			"exit_code": int(sub.get("exit_code", -1))
+		}
 	var url := base + "/lint"
 	var project_root_abs := ProjectSettings.globalize_path("res://")
 	var body := JSON.stringify({"project_root_abs": project_root_abs, "path": res_path})
@@ -1394,133 +1495,24 @@ func _request_backend_lint(res_path: String) -> Dictionary:
 	var args: Array = await req.request_completed
 	req.queue_free()
 	if args[0] != HTTPRequest.RESULT_SUCCESS:
-		return {"success": false, "message": "Lint request failed", "path": res_path, "output": "", "exit_code": -1}
+		var fail_msg := "Lint request failed (is the RAG backend running?)"
+		set_last_lint_result(res_path, fail_msg)
+		return {"success": false, "message": fail_msg, "path": res_path, "output": fail_msg, "exit_code": -1}
 	var resp_body: PackedByteArray = args[3]
 	var json := JSON.new()
 	if json.parse(resp_body.get_string_from_utf8()) != OK or typeof(json.data) != TYPE_DICTIONARY:
-		return {"success": false, "message": "Invalid lint response", "path": res_path, "output": "", "exit_code": -1}
+		var invalid_msg := "Invalid lint response from backend"
+		set_last_lint_result(res_path, invalid_msg)
+		return {"success": false, "message": invalid_msg, "path": res_path, "output": invalid_msg, "exit_code": -1}
 	var d: Dictionary = json.data
 	var ok := bool(d.get("success", false))
 	var out_text := str(d.get("output", "")).strip_edges()
+	set_last_lint_result(res_path, out_text)
 	return {"success": ok, "message": "Lint passed" if ok else "Lint reported issues", "path": res_path, "output": out_text, "exit_code": int(d.get("exit_code", -1))}
 
 
-func _run_headless_lint(_project_dir_abs: String, rel_path_from_res: String) -> Dictionary:
-	# Use backend /lint so we never spawn Godot from inside the editor (crashes). Return shape expected by autofix: ok, exit_code, output.
-	var res_path := "res://" + rel_path_from_res.trim_prefix("/")
-	var d := await _request_backend_lint(res_path)
-	return {"ok": d.get("success", false), "exit_code": d.get("exit_code", -1), "output": d.get("output", "")}
-
-
 func _query_backend_for_tools(question: String, lint_output: String = "", override_file_path: String = "", override_file_text: String = "") -> Dictionary:
-	# Remember prompt so any tool-driven edits can be attributed.
-	_last_tool_prompt = question
-	_last_tool_trigger = "tool_action"
-	var endpoint := rag_service_url + "/query"
-	var active_script_path := ""
-	var active_script_text := ""
-	var active_scene_path := ""
-	var project_root_abs := ProjectSettings.globalize_path("res://")
-	if not override_file_path.is_empty():
-		# Lint-fix mode: use the file we are fixing so the backend has the right active file.
-		active_script_path = override_file_path
-		active_script_text = override_file_text if not override_file_text.is_empty() else _read_text_res(override_file_path)
-	elif _editor_interface:
-		var scene_root := _editor_interface.get_edited_scene_root()
-		if scene_root:
-			active_scene_path = scene_root.scene_file_path
-		var selected_script: Script = null
-		var selection := _editor_interface.get_selection() if _editor_interface else null
-		if selection:
-			var nodes := selection.get_selected_nodes()
-			if nodes and nodes.size() > 0:
-				var n: Node = nodes[0]
-				if n and n.get_script() is Script:
-					selected_script = n.get_script()
-		if selected_script == null and scene_root and scene_root.get_script() is Script:
-			selected_script = scene_root.get_script()
-		if selected_script:
-			active_script_path = selected_script.resource_path
-			if "source_code" in selected_script:
-				active_script_text = selected_script.source_code
-
-	var payload: Dictionary = {
-		"question": question,
-		"context": {
-			"engine_version": Engine.get_version_info().get("string"),
-			"language": "gdscript",
-			"selected_node_type": "",
-			"current_script": active_script_path,
-			"extra": {
-				"active_file_text": active_script_text,
-				"active_scene_path": active_scene_path,
-				"project_root_abs": project_root_abs,
-				"lint_output": lint_output,
-			}
-		},
-		"top_k": 3
-	}
-	if _settings:
-		if _settings.openai_api_key.length() > 0:
-			payload["api_key"] = _settings.openai_api_key
-		if _settings.selected_model.length() > 0:
-			payload["model"] = _settings.selected_model
-		if _settings.openai_base_url.length() > 0:
-			payload["base_url"] = _settings.openai_base_url
-
-	var body := JSON.stringify(payload)
-
-	# Minimal HTTP POST using HTTPClient (same parsing logic as streaming, but read whole body).
-	var client := HTTPClient.new()
-	var scheme_split := endpoint.split("://")
-	var remainder := scheme_split[1] if scheme_split.size() == 2 else endpoint
-	var first_slash := remainder.find("/")
-	var host_port := remainder if first_slash == -1 else remainder.substr(0, first_slash)
-	var path := "/" if first_slash == -1 else remainder.substr(first_slash)
-	var host := host_port
-	var port := 80
-	var colon_index := host_port.find(":")
-	if colon_index != -1:
-		host = host_port.substr(0, colon_index)
-		port = int(host_port.substr(colon_index + 1))
-
-	var err := client.connect_to_host(host, port)
-	if err != OK:
-		return {}
-
-	while client.get_status() in [HTTPClient.STATUS_CONNECTING, HTTPClient.STATUS_RESOLVING]:
-		client.poll()
-		await get_tree().process_frame
-
-	if client.get_status() != HTTPClient.STATUS_CONNECTED:
-		return {}
-
-	var headers := PackedStringArray([
-		"Content-Type: application/json",
-		"Content-Length: %d" % body.to_utf8_buffer().size()
-	])
-	client.request(HTTPClient.METHOD_POST, path, headers, body)
-
-	while client.get_status() == HTTPClient.STATUS_REQUESTING:
-		client.poll()
-		await get_tree().process_frame
-
-	if client.get_status() != HTTPClient.STATUS_BODY:
-		return {}
-
-	var response_bytes := PackedByteArray()
-	while client.get_status() == HTTPClient.STATUS_BODY:
-		client.poll()
-		var chunk := client.read_response_body_chunk()
-		if chunk.size() > 0:
-			response_bytes.append_array(chunk)
-		await get_tree().process_frame
-
-	var body_text := response_bytes.get_string_from_utf8()
-	var json := JSON.new()
-	if json.parse(body_text) != OK:
-		return {}
-	return json.data if json.data is Dictionary else {}
+	return await _backend_api.query_backend_for_tools(question, lint_output, override_file_path, override_file_text)
 
 
 func _post_system_message(text: String) -> void:
@@ -1530,48 +1522,21 @@ func _post_system_message(text: String) -> void:
 	_render_chat_log()
 
 
+func _append_error_to_chat(error_message: String) -> void:
+	_post_system_message("**Error**\n\n" + error_message)
+
+
 func _ensure_chat_has_messages() -> void:
-	if _current_chat < 0 or _current_chat >= _chats.size():
-		return
-	var chat: Dictionary = _chats[_current_chat]
-	if not chat.has("prompt_draft"):
-		chat["prompt_draft"] = ""
-	if not chat.has("current_activity"):
-		chat["current_activity"] = {}
-	if not chat.has("activity_history"):
-		chat["activity_history"] = []
-	if not chat.has("messages"):
-		# Migrate old transcript to a single assistant message
-		var transcript: String = chat.get("transcript", "")
-		chat["messages"] = []
-		if transcript.strip_edges().length() > 0:
-			chat["messages"].append({"role": "assistant", "text": transcript})
-		chat.erase("transcript")
-	if not chat.has("context_usage"):
-		chat["context_usage"] = {}
+	_chat_state.ensure_chat_has_messages()
 
 
 func _ensure_default_chat() -> void:
-	if chat_tab_bar == null:
-		return
-	if _chats.is_empty():
-		var title := "Chat 1"
-		_chats.append({"title": title, "messages": [], "context_usage": {}, "prompt_draft": "", "current_activity": {}, "activity_history": []})
-		chat_tab_bar.clear_tabs()
-		chat_tab_bar.add_tab(title)
-		_current_chat = 0
-		chat_tab_bar.current_tab = 0
+	if _chat_state:
+		_chat_state.ensure_default_chat()
 
 
 func _on_new_chat_pressed() -> void:
-	if chat_tab_bar == null:
-		return
-	var idx := _chats.size() + 1
-	var title := "Chat %d" % idx
-	_chats.append({"title": title, "messages": [], "context_usage": {}, "prompt_draft": "", "current_activity": {}, "activity_history": []})
-	chat_tab_bar.add_tab(title)
-	_current_chat = _chats.size() - 1
-	chat_tab_bar.current_tab = _current_chat
+	_chat_state.on_new_chat_pressed()
 	_streamed_markdown = ""
 	_ensure_chat_has_messages()
 	_update_context_usage_label()
@@ -1579,51 +1544,55 @@ func _on_new_chat_pressed() -> void:
 
 
 func _on_chat_tab_selected(tab_index: int) -> void:
-	if tab_index < 0 or tab_index >= _chats.size():
-		return
-	# Save current chat's prompt draft and activity before switching
-	if _current_chat >= 0 and _current_chat < _chats.size():
-		var cur: Dictionary = _chats[_current_chat]
-		if not cur.has("prompt_draft"):
-			cur["prompt_draft"] = ""
-		cur["prompt_draft"] = prompt_text_edit.text if prompt_text_edit else ""
-		cur["current_activity"] = _current_activity.duplicate()
-		cur["activity_history"] = _activity_history.duplicate()
-	_current_chat = tab_index
-	_ensure_chat_has_messages()
-	var chat: Dictionary = _chats[tab_index]
-	# Restore prompt and activity for the selected chat
-	if prompt_text_edit:
-		prompt_text_edit.text = chat.get("prompt_draft", "")
-	_current_activity = (chat.get("current_activity", {}) as Dictionary).duplicate()
-	_activity_history = (chat.get("activity_history", []) as Array).duplicate()
-	var messages: Array = chat.get("messages", [])
-	_streamed_markdown = ""
-	if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
-		_streamed_markdown = messages[messages.size() - 1].get("text", "")
+	if not _streaming_in_progress:
+		if _typewriter_timer != null:
+			_typewriter_timer.stop()
+		_tw_active_chat_index = -1
+	_chat_state.on_chat_tab_selected(tab_index)
 	_update_activity_ui()
 	_render_chat_log()
 	_update_context_usage_label()
 	_update_tool_calls_ui()
+	_refresh_pinned_context_row()
+	if context_viewer_panel and context_viewer_panel.visible:
+		_refresh_context_viewer_panel()
 
 
-func _on_chat_tab_rearranged(_idx_to: int) -> void:
-	# TabBar has already reordered its tabs; sync _chats to match the new tab order.
-	if chat_tab_bar == null or _chats.size() != chat_tab_bar.tab_count:
+func _on_chat_tab_rearranged(idx_to: int) -> void:
+	_chat_state.on_chat_tab_rearranged(idx_to)
+	if _current_chat >= 0 and _current_chat < _chats.size():
+		_render_chat_log()
+		_update_context_usage_label()
+
+
+func _on_chat_tab_close_pressed(tab_index: int) -> void:
+	_delete_chat_at_index(tab_index)
+
+
+func _delete_chat_at_index(idx: int) -> void:
+	if idx < 0 or idx >= _chats.size():
 		return
-	var new_chats: Array = []
-	for i in range(chat_tab_bar.tab_count):
-		var title := chat_tab_bar.get_tab_title(i)
-		for c in _chats:
-			if typeof(c) == TYPE_DICTIONARY and str(c.get("title", "")) == title:
-				new_chats.append(c)
-				break
-	if new_chats.size() == _chats.size():
-		_chats = new_chats
-		_current_chat = chat_tab_bar.current_tab
-		if _current_chat >= 0 and _current_chat < _chats.size():
-			_render_chat_log()
-			_update_context_usage_label()
+	var was_current := (idx == _current_chat)
+	_chats.remove_at(idx)
+	if chat_tab_bar and chat_tab_bar.tab_count > idx:
+		chat_tab_bar.remove_tab(idx)
+	if _chats.is_empty():
+		if _chat_state:
+			_chat_state.ensure_default_chat()
+		return
+	# Adjust current index: if we removed the current tab or one before it, update.
+	if was_current:
+		_current_chat = mini(idx, _chats.size() - 1)
+	elif idx < _current_chat:
+		_current_chat -= 1
+	chat_tab_bar.current_tab = _current_chat
+	if _chat_state:
+		_chat_state.on_chat_tab_selected(_current_chat)
+	_render_chat_log()
+	_update_context_usage_label()
+	_update_activity_ui()
+	_update_tool_calls_ui()
+	_update_ask_button_state()
 
 
 func _on_main_tab_changed(tab_index: int) -> void:
@@ -1638,277 +1607,48 @@ func _on_main_tab_changed(tab_index: int) -> void:
 
 
 func _on_history_refresh_pressed() -> void:
-	_refresh_history()
+	_history_tab.refresh_history()
 
 
 func _refresh_history() -> void:
-	var data := await _query_backend_json("%s/edit_events/list?limit=500" % rag_service_url, HTTPClient.METHOD_GET, "")
-	if typeof(data) != TYPE_DICTIONARY:
-		return
-	var events = data.get("events", [])
-	if events is Array:
-		_history_events = events
-	_render_history_list()
+	_history_tab.refresh_history()
 
 
 func _render_history_list() -> void:
-	if not history_list:
-		return
-	history_list.clear()
-	_selected_history_edit_id = -1
-	if history_detail_label:
-		history_detail_label.text = ""
-	for e in _history_events:
-		if typeof(e) != TYPE_DICTIONARY:
-			continue
-		var id_val := int(e.get("id", -1))
-		var summary := str(e.get("summary", ""))
-		var trigger := str(e.get("trigger", ""))
-		var ts := float(e.get("timestamp", 0.0))
-		var time_str := Time.get_datetime_string_from_unix_time(int(ts)) if ts > 0 else ""
-		var changes = e.get("changes", [])
-		var add_total := 0
-		var rem_total := 0
-		var file_count := 0
-		if changes is Array:
-			file_count = changes.size()
-			for c in changes:
-				if typeof(c) == TYPE_DICTIONARY:
-					add_total += int(c.get("lines_added", 0))
-					rem_total += int(c.get("lines_removed", 0))
-		var time_part := ("[%s]  " % time_str) if not time_str.is_empty() else ""
-		var label := "%s#%d  %d file(s)  [+%d -%d]  %s  (%s)" % [time_part, id_val, file_count, add_total, rem_total, summary, trigger]
-		history_list.add_item(label)
+	_history_tab.render_history_list()
 
 
 func _on_history_item_selected(index: int) -> void:
-	if index < 0 or index >= _history_events.size():
-		return
-	var e = _history_events[index]
-	if typeof(e) != TYPE_DICTIONARY:
-		return
-	_selected_history_edit_id = int(e.get("id", -1))
-	if history_detail_label:
-		history_detail_label.text = ""
-		var parts: Array[String] = []
-		parts.append("[b]Edit #%d[/b]\n" % _selected_history_edit_id)
-		var ts := float(e.get("timestamp", 0.0))
-		if ts > 0:
-			parts.append("[b]Timestamp:[/b] %s\n" % Time.get_datetime_string_from_unix_time(int(ts)))
-		parts.append("[b]Summary:[/b] %s\n" % str(e.get("summary", "")))
-		parts.append("[b]Trigger:[/b] %s\n" % str(e.get("trigger", "")))
-		var changes = e.get("changes", [])
-		if changes is Array and changes.size() > 0:
-			parts.append("\n[b]Files changed:[/b]")
-			for c in changes:
-				if typeof(c) != TYPE_DICTIONARY:
-					continue
-				var fp := str(c.get("file_path", ""))
-				var ct := str(c.get("change_type", "modify"))
-				var add_n := int(c.get("lines_added", 0))
-				var rem_n := int(c.get("lines_removed", 0))
-				parts.append("\n  • %s  (%s)  [+%d -%d]" % [fp, ct, add_n, rem_n])
-				var diff := str(c.get("diff", ""))
-				if not diff.is_empty():
-					parts.append("\n  [code]" + _escape_bbcode(diff) + "[/code]")
-			parts.append("")
-		var prompt_text := str(e.get("prompt", ""))
-		if not prompt_text.is_empty():
-			parts.append("\n[b]Prompt:[/b]\n[code]" + _escape_bbcode(prompt_text) + "[/code]\n")
-		var semantic := str(e.get("semantic_summary", ""))
-		if not semantic.is_empty():
-			parts.append("\n[b]Summary (AI):[/b] %s\n" % _escape_bbcode(semantic))
-		var lint_before := str(e.get("lint_errors_before", ""))
-		if not lint_before.is_empty():
-			parts.append("\n[b]Lint before:[/b]\n[code]" + _escape_bbcode(lint_before) + "[/code]\n")
-		var lint_after := str(e.get("lint_errors_after", ""))
-		if not lint_after.is_empty():
-			parts.append("\n[b]Lint after:[/b]\n[code]" + _escape_bbcode(lint_after) + "[/code]\n")
-		history_detail_label.bbcode_enabled = true
-		history_detail_label.text = "\n".join(parts)
+	_history_tab.on_history_item_selected(index)
 
 
 func _on_history_undo_pressed() -> void:
-	if _selected_history_edit_id < 0:
-		return
-	var endpoint := "%s/edit_events/undo/%d" % [rag_service_url, _selected_history_edit_id]
-	var data := await _query_backend_json(endpoint, HTTPClient.METHOD_POST, "{}")
-	if typeof(data) != TYPE_DICTIONARY:
-		return
-	var tool_calls = data.get("tool_calls", [])
-	if tool_calls is Array and tool_calls.size() > 0 and _tool_executor:
-		await _run_editor_actions_async(tool_calls, false, "undo", "Undo edit #%d" % _selected_history_edit_id)
-		_refresh_history()
+	await _history_tab.on_history_undo_pressed()
 
 
 func _query_backend_json(endpoint: String, method: int, body: String) -> Variant:
-	var client := HTTPClient.new()
-	var scheme_split := endpoint.split("://")
-	var remainder := scheme_split[1] if scheme_split.size() == 2 else endpoint
-	var first_slash := remainder.find("/")
-	var host_port := remainder if first_slash == -1 else remainder.substr(0, first_slash)
-	var path := "/" if first_slash == -1 else remainder.substr(first_slash)
-	var host := host_port
-	var port := 80
-	var colon_index := host_port.find(":")
-	if colon_index != -1:
-		host = host_port.substr(0, colon_index)
-		port = int(host_port.substr(colon_index + 1))
-
-	var err := client.connect_to_host(host, port)
-	if err != OK:
-		return null
-	while client.get_status() in [HTTPClient.STATUS_CONNECTING, HTTPClient.STATUS_RESOLVING]:
-		client.poll()
-		await get_tree().process_frame
-	if client.get_status() != HTTPClient.STATUS_CONNECTED:
-		return null
-
-	var headers := PackedStringArray(["Content-Type: application/json"])
-	if method == HTTPClient.METHOD_POST:
-		headers.append("Content-Length: %d" % body.to_utf8_buffer().size())
-		client.request(method, path, headers, body)
-	else:
-		client.request(method, path, headers, "")
-
-	while client.get_status() == HTTPClient.STATUS_REQUESTING:
-		client.poll()
-		await get_tree().process_frame
-	if client.get_status() != HTTPClient.STATUS_BODY:
-		return null
-
-	var response_bytes := PackedByteArray()
-	while client.get_status() == HTTPClient.STATUS_BODY:
-		client.poll()
-		var chunk := client.read_response_body_chunk()
-		if chunk.size() > 0:
-			response_bytes.append_array(chunk)
-		await get_tree().process_frame
-
-	var body_text := response_bytes.get_string_from_utf8()
-	var json := JSON.new()
-	if json.parse(body_text) != OK:
-		return null
-	return json.data
+	return await GodotAIBackendClient.query_json(self, endpoint, method, body)
 
 
 func _refresh_settings_tab_from_config() -> void:
-	if _settings == null:
-		return
-	_settings.load_settings()
-	if settings_text_size_spin:
-		settings_text_size_spin.value = _settings.text_size
-	if settings_word_wrap_check:
-		settings_word_wrap_check.button_pressed = _settings.word_wrap
-	if settings_rag_url_edit:
-		settings_rag_url_edit.text = _settings.rag_service_url
-	if settings_api_key_edit:
-		settings_api_key_edit.text = _settings.openai_api_key
-	if settings_base_url_edit:
-		settings_base_url_edit.text = _settings.openai_base_url
-	if settings_model_option:
-		settings_model_option.clear()
-		for i in range(_settings.get_openai_models().size()):
-			var m: String = _settings.get_openai_models()[i]
-			settings_model_option.add_item(m, i)
-		var idx: int = _settings.get_openai_models().find(_settings.selected_model)
-		if idx >= 0:
-			settings_model_option.select(idx)
-		else:
-			settings_model_option.select(0)
-	_refresh_index_and_context_status()
+	if _settings_tab:
+		_settings_tab.refresh_settings_tab_from_config()
 
 
 func _refresh_index_and_context_status() -> void:
-	_update_context_windows_ui()
-	if not index_status_request:
-		return
-	var base := (settings_rag_url_edit.text if settings_rag_url_edit else rag_service_url).strip_edges()
-	if base.is_empty():
-		base = rag_service_url
-	var project_root := ProjectSettings.globalize_path("res://").strip_edges()
-	var url := base + "/index_status"
-	if not project_root.is_empty():
-		url += "?project_root=" + project_root.uri_encode()
-	indexing_content.text = "Loading..."
-	index_status_request.request(url)
+	_settings_tab.refresh_index_and_context_status()
 
 
-func _on_index_status_request_completed(_result: int, _response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
-	var json_str := body.get_string_from_utf8()
-	if json_str.is_empty():
-		if indexing_content:
-			indexing_content.text = "Could not reach backend."
-		return
-	var j := JSON.new()
-	if j.parse(json_str) != OK:
-		if indexing_content:
-			indexing_content.text = "Invalid response."
-		return
-	var d = j.data
-	if typeof(d) != TYPE_DICTIONARY:
-		if indexing_content:
-			indexing_content.text = "Invalid response."
-		return
-	var lines: Array[String] = []
-	lines.append("Chroma docs: %d chunks" % int(d.get("chroma_docs", 0)))
-	lines.append("Chroma project_code: %d snippets" % int(d.get("chroma_project_code", 0)))
-	var repo_err = d.get("repo_index_error", null)
-	if repo_err != null and str(repo_err).strip_edges().length() > 0:
-		lines.append("Repo index: %s" % str(repo_err))
-	elif d.get("repo_index_files", null) != null:
-		lines.append("Repo index: %d files, %d edges" % [int(d.get("repo_index_files", 0)), int(d.get("repo_index_edges", 0))])
-	else:
-		lines.append("Repo index: (send project_root for stats)")
-	if indexing_content:
-		indexing_content.text = "\n".join(lines)
-	_update_context_windows_ui()
+func _on_index_status_request_completed(result: int, response_code: int, headers: PackedStringArray, body: PackedByteArray) -> void:
+	_settings_tab.on_index_status_request_completed(result, response_code, headers, body)
 
 
 func _update_context_windows_ui() -> void:
-	if not context_windows_list:
-		return
-	for c in context_windows_list.get_children():
-		c.queue_free()
-	for i in range(_chats.size()):
-		var chat: Dictionary = _chats[i]
-		var title: String = chat.get("title", "Chat %d" % (i + 1))
-		var messages: Array = chat.get("messages", [])
-		var usage: Dictionary = chat.get("context_usage", {})
-		var est: int = int(usage.get("estimated_prompt_tokens", 0))
-		var limit: int = int(usage.get("limit_tokens", 0))
-		var pct: float = float(usage.get("percent", 0.0))
-		var usage_str := "—"
-		if limit > 0 and est > 0:
-			usage_str = "%d tokens (~%d%%)" % [est, int(pct * 100.0)]
-		elif est > 0:
-			usage_str = "%d tokens" % est
-		var line := "%s: %d messages, %s" % [title, messages.size(), usage_str]
-		var l := Label.new()
-		l.text = line
-		l.add_theme_font_size_override("font_size", 12)
-		l.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-		context_windows_list.add_child(l)
+	_settings_tab.update_context_windows_ui()
 
 
 func _save_settings_tab_to_config() -> void:
-	if _settings == null:
-		return
-	if settings_text_size_spin:
-		_settings.text_size = int(settings_text_size_spin.value)
-	if settings_word_wrap_check:
-		_settings.word_wrap = settings_word_wrap_check.button_pressed
-	if settings_rag_url_edit:
-		_settings.rag_service_url = settings_rag_url_edit.text.strip_edges()
-	if settings_api_key_edit:
-		_settings.openai_api_key = settings_api_key_edit.text
-	if settings_base_url_edit:
-		_settings.openai_base_url = settings_base_url_edit.text.strip_edges()
-	if settings_model_option and settings_model_option.selected >= 0:
-		var models: Array[String] = _settings.get_openai_models()
-		if settings_model_option.selected < models.size():
-			_settings.selected_model = models[settings_model_option.selected]
-	_settings.save_settings()
+	_settings_tab.save_settings_tab_to_config()
 
 
 func _on_settings_save_pressed() -> void:
@@ -1936,8 +1676,7 @@ func _apply_settings_from_config() -> void:
 	rag_service_url = _settings.rag_service_url
 	if follow_agent_check:
 		follow_agent_check.button_pressed = _settings.follow_agent
-	if allow_editor_actions_check:
-		allow_editor_actions_check.button_pressed = _settings.allow_editor_actions
+	# Tools and auto-lint are always on; no UI to sync.
 	if model_option:
 		model_option.clear()
 		for i in range(_settings.get_openai_models().size()):
@@ -1949,19 +1688,13 @@ func _apply_settings_from_config() -> void:
 		else:
 			model_option.select(0)
 	_apply_display_settings()
+	# Re-render chat so message list uses new font size / word wrap (when using chat_message_list).
+	if _chat_renderer:
+		_chat_renderer.render_chat_log()
 
 
 func _apply_display_settings() -> void:
-	if _settings == null:
-		return
-	var font_size: int = _settings.text_size
-	if output_text_edit:
-		output_text_edit.add_theme_font_size_override("normal_font_size", font_size)
-		output_text_edit.add_theme_font_size_override("mono_font_size", font_size)
-		output_text_edit.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART if _settings.word_wrap else TextServer.AUTOWRAP_OFF
-	if prompt_text_edit:
-		prompt_text_edit.add_theme_font_size_override("font_size", font_size)
-		prompt_text_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY if _settings.word_wrap else TextEdit.LINE_WRAPPING_NONE
+	_settings_tab.apply_display_settings()
 
 
 func _on_model_selected(_index: int) -> void:
@@ -1978,10 +1711,6 @@ func _on_follow_agent_toggled(_pressed: bool) -> void:
 		_settings.save_settings()
 
 
-func _on_allow_editor_actions_toggled(_pressed: bool) -> void:
-	if _settings and allow_editor_actions_check:
-		_settings.allow_editor_actions = allow_editor_actions_check.button_pressed
-		_settings.save_settings()
 
 
 func _start_health_check() -> void:
