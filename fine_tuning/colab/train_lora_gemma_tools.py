@@ -320,20 +320,33 @@ def build_mixed_dataset() -> DatasetDict:
 
 def load_tokenizer_and_model() -> tuple[AutoTokenizer, AutoModelForCausalLM]:
     """
-    Load the base model in 4-bit with the tokenizer.
+    Load the base model with the tokenizer. Prefer 4-bit QLoRA; if bitsandbytes
+    or triton fails (e.g. missing CUDA .so or triton.ops), fall back to bfloat16
+    so Colab can still run (uses more VRAM).
     """
     tokenizer = AutoTokenizer.from_pretrained(BASE_MODEL_ID, trust_remote_code=True)
-    # For chat models, ensure we have a pad token
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        BASE_MODEL_ID,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-    )
-    # Wrap with LoRA
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            BASE_MODEL_ID,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+    except (RuntimeError, ModuleNotFoundError, OSError) as e:
+        if "triton" in str(e).lower() or "bitsandbytes" in str(e).lower() or "libbitsandbytes" in str(e).lower():
+            # Fallback: load in bfloat16 without 4-bit (needs more VRAM but works without bitsandbytes CUDA/triton)
+            model = AutoModelForCausalLM.from_pretrained(
+                BASE_MODEL_ID,
+                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+                trust_remote_code=True,
+            )
+        else:
+            raise
+
     model = get_peft_model(model, lora_config)
     return tokenizer, model
 
