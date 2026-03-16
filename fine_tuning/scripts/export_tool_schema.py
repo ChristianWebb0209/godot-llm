@@ -23,7 +23,7 @@ def main() -> None:
     sys.path.insert(0, str(rag))
 
     try:
-        from app.services.tools import get_registered_tools
+        from app.tools import get_registered_tools
     except ImportError as e:
         sys.stderr.write(
             f"Could not import rag_service app ({e}). "

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Read synthetic (and optional extra) tool-use JSONL, split into train/val, and write
-fine_tuning/data/train.jsonl and fine_tuning/data/val.jsonl.
+fine_tuning/data/tool_usage/train.jsonl and fine_tuning/data/tool_usage/val.jsonl.
+Colab (train_lora_gemma_tools.py) reads from data/tool_usage/, so this script
+writes there directly.
 
 Each input line must be a JSON object with "messages" (array of system/user/assistant
 with optional tool_calls on assistant). Output format is the same (one JSON object per line).
@@ -22,13 +24,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "fine_tuning" / "data"
+TOOL_USAGE_DIR = DATA_DIR / "tool_usage"
 SYNTHETIC_DIR = DATA_DIR / "synthetic"
 SEEDS_DIR = DATA_DIR / "seeds"
 RAW_DIR = DATA_DIR / "raw"
 TOOLS_USAGE_DIR = REPO_ROOT / "godot_knowledge_base" / "tools_usage"
 DEFAULT_INPUT = SYNTHETIC_DIR / "generated.jsonl"
-TRAIN_OUT = DATA_DIR / "train.jsonl"
-VAL_OUT = DATA_DIR / "val.jsonl"
+TRAIN_OUT = TOOL_USAGE_DIR / "train.jsonl"
+VAL_OUT = TOOL_USAGE_DIR / "val.jsonl"
 
 DEFAULT_SOURCE_DIRS = [SYNTHETIC_DIR, SEEDS_DIR, RAW_DIR, TOOLS_USAGE_DIR]
 
@@ -141,8 +144,8 @@ def main() -> None:
 
     if not examples:
         sys.stderr.write(
-            "No valid examples found. Add JSONL to synthetic/, seeds/, raw/, or godot_knowledge_base/tools_usage/, "
-            "or pass --inputs or --include-all.\n"
+        "No valid examples found. Add JSONL to data/synthetic/, data/seeds/, data/raw/, or godot_knowledge_base/tools_usage/, "
+        "or pass --inputs or --include-all.\n"
         )
         sys.exit(1)
 
@@ -153,7 +156,7 @@ def main() -> None:
     train_examples = examples[:n_train]
     val_examples = examples[n_train:]
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    TOOL_USAGE_DIR.mkdir(parents=True, exist_ok=True)
     with open(TRAIN_OUT, "w", encoding="utf-8") as f:
         for rec in train_examples:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
