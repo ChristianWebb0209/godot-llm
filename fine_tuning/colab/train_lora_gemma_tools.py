@@ -372,12 +372,27 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     We train the model to generate the 'text' field.
     Tuned for ~15 GB Colab GPU: batch_size=1, max_seq_length=1024, gradient_checkpointing.
 
+    Checkpoint behavior is configurable via environment variables:
+    - CHECKPOINT_DIR:          output directory for checkpoints (default: "./godot-tools-lora")
+    - CHECKPOINT_STEPS:        save checkpoint every N steps        (default: "200")
+    - CHECKPOINT_TOTAL_LIMIT:  keep at most N checkpoints on disk   (default: "3")
+
     To resume from a checkpoint after interrupt: call
       trainer.train(resume_from_checkpoint=True)
     (uses latest checkpoint in output_dir, e.g. ./godot-tools-lora/checkpoint-200).
     """
+    output_dir = os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")
+    try:
+        save_steps = int(os.environ.get("CHECKPOINT_STEPS", "200"))
+    except ValueError:
+        save_steps = 200
+    try:
+        save_total_limit = int(os.environ.get("CHECKPOINT_TOTAL_LIMIT", "3"))
+    except ValueError:
+        save_total_limit = 3
+
     training_args = TrainingArguments(
-        output_dir="./godot-tools-lora",
+        output_dir=output_dir,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=16,
@@ -389,8 +404,8 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         evaluation_strategy="steps",
         eval_steps=100,
         save_strategy="steps",
-        save_steps=200,
-        save_total_limit=3,
+        save_steps=save_steps,
+        save_total_limit=save_total_limit,
         bf16=torch.cuda.is_available(),
         fp16=not torch.cuda.is_available(),
         gradient_checkpointing=True,

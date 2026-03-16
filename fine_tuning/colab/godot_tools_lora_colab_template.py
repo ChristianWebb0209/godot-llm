@@ -43,13 +43,16 @@ else:
 
 # ## 1. Install Python dependencies
 #
-# We pin numpy<2 and trl==0.9.6 so SFTTrainer(tokenizer=...) works. Pip may warn
-# about other Colab packages (tensorflow, numba, etc.); those can be ignored.
+# We pin numpy<2 and trl==0.9.6 so SFTTrainer(tokenizer=...) works. We use
+# transformers 4.48.x (4.46.0 is yanked). Pip may warn about other Colab
+# packages (tensorflow, numba, etc.); those can be ignored.
 
+
+!pip uninstall -y transformers || true
 
 !pip install -q "numpy<2.0" \
   "trl==0.9.6" \
-  transformers==4.46.0 \
+  "transformers>=4.48.0,<4.49" \
   accelerate==0.34.2 \
   datasets==3.0.0 \
   peft==0.13.0 \
@@ -64,11 +67,12 @@ else:
 #
 # If you see "Could not find the bitsandbytes CUDA binary" or "No module named
 # 'triton.ops'", run this cell then **Runtime → Restart session** and re-run
-# from the imports cell. HF_TOKEN warning is optional (only needed for gated models).
+# from the imports cell. We re-pin numpy<2 so pip does not upgrade to numpy 2.x
+# (which breaks scipy/trl on Colab). HF_TOKEN warning is optional (gated models).
 
 
-!pip install triton --quiet
-!pip install --no-cache-dir --force-reinstall bitsandbytes>=0.43.0 --quiet
+!pip install -q "numpy<2.0" triton
+!pip install -q "numpy<2.0" --no-cache-dir --force-reinstall "bitsandbytes>=0.43.0"
 
 
 # ## 2. Imports and config
@@ -205,8 +209,45 @@ trainer = build_trainer(tokenizer, model, dataset)
 # Otherwise use trainer.train() for a fresh run.
 
 
-trainer.train()
-# To resume after an interrupt: trainer.train(resume_from_checkpoint=True)
+CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")).resolve()
+latest_checkpoint = None
+if CHECKPOINT_DIR.exists():
+    ckpt_dirs = [
+        p for p in CHECKPOINT_DIR.iterdir()
+        if p.is_dir() and p.name.startswith("checkpoint-")
+    ]
+    if ckpt_dirs:
+        # Sort by global step encoded in "checkpoint-{step}" (fall back to name sort).
+        def _step_key(p: Path) -> int:
+            try:
+                return int(p.name.split("-")[-1])
+            except ValueError:
+                return -1
+
+        ckpt_dirs.sort(key=_step_key)
+        latest_checkpoint = ckpt_dirs[-1]
+
+resume_cfg = os.environ.get("RESUME_FROM_CHECKPOINT", "auto").lower()
+use_resume = False
+if resume_cfg in ("1", "true", "yes"):
+    use_resume = latest_checkpoint is not None
+elif resume_cfg in ("0", "false", "no"):
+    use_resume = False
+else:
+    # "auto": resume iff we actually found a checkpoint
+    use_resume = latest_checkpoint is not None
+
+if use_resume and latest_checkpoint is not None:
+    print(f"Resuming training from checkpoint: {latest_checkpoint}")
+    trainer.train(resume_from_checkpoint=str(latest_checkpoint))
+else:
+    if latest_checkpoint is not None:
+        print(
+            f"Found existing checkpoint at {latest_checkpoint}, "
+            "but RESUME_FROM_CHECKPOINT is set to disable auto-resume; "
+            "starting a fresh run."
+        )
+    trainer.train()
 
 adapter_out_dir = "godot-tools-lora-adapter"
 trainer.model.save_pretrained(adapter_out_dir)
