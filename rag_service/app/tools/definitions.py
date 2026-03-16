@@ -2,13 +2,10 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from ..db import list_edit_events
-from ..rag_core import SourceChunk, _collect_top_docs, _collect_code_results, _collect_code_by_extends
 from ..services.asset_library import search_asset_library
 from ..services.context import (
-    format_component_scripts_block,
     grep_project_files,
     read_project_godot_ini,
-    SCRAPED_CODE_DISCLAIMER,
 )
 
 
@@ -20,93 +17,6 @@ class ToolDef:
     parameters: Dict[str, Any]
     # Backend implementation: (args_dict) -> result serializable to JSON
     handler: Callable[[Dict[str, Any]], Any]
-
-
-def _tool_search_docs(args: Dict[str, Any]) -> Dict[str, Any]:
-    query: str = args.get("query", "")
-    top_k: int = int(args.get("top_k", 5))
-    docs: List[SourceChunk] = _collect_top_docs(query, top_k=top_k)
-    return {
-        "results": [
-            {
-                "id": d.id,
-                "path": d.source_path,
-                "score": d.score,
-                "metadata": d.metadata,
-                "preview": d.text_preview,
-            }
-            for d in docs
-        ]
-    }
-
-
-def _tool_search_project_code(args: Dict[str, Any]) -> Dict[str, Any]:
-    query: str = args.get("query", "")
-    language: Optional[str] = args.get("language") or None
-    top_k: int = int(args.get("top_k", 5))
-    snippets: List[SourceChunk] = _collect_code_results(
-        question=query,
-        language=language,
-        top_k=top_k,
-    )
-    return {
-        "results": [
-            {
-                "id": s.id,
-                "path": s.source_path,
-                "score": s.score,
-                "metadata": s.metadata,
-                "preview": s.text_preview,
-            }
-            for s in snippets
-        ]
-    }
-
-
-def _tool_request_component_context(args: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fetch full script examples for specific node/component types (extends classes).
-    Use when the AI needs more context on how to implement a given component
-    (e.g. CharacterBody2D, Control, Camera3D) or when the user asks for more examples.
-    """
-    raw = args.get("components") or args.get("component")
-    if isinstance(raw, str):
-        components = [s.strip() for s in raw.split(",") if s.strip()]
-    elif isinstance(raw, list):
-        components = [str(c).strip() for c in raw if str(c).strip()]
-    else:
-        components = []
-    if not components:
-        return {
-            "error": "components is required: list of node types (e.g. ['CharacterBody2D', 'Control']) or comma-separated string.",
-            "context_added": False,
-        }
-    language: Optional[str] = args.get("language") or None
-    max_per: int = int(args.get("max_scripts_per_component", 3))
-    max_per = max(1, min(5, max_per))
-    blocks: List[str] = []
-    for extends_class in components[:10]:
-        if not extends_class or extends_class == "Node":
-            continue
-        try:
-            scripts = _collect_code_by_extends(extends_class, language=language, max_scripts=max_per)
-            block = format_component_scripts_block(extends_class, scripts)
-            if block:
-                blocks.append(block)
-        except Exception:
-            continue
-    if not blocks:
-        return {
-            "context_added": False,
-            "components_requested": components,
-            "message": "No example scripts found for the requested component types. Try search_project_code with a query instead.",
-        }
-    return {
-        "context_added": True,
-        "components_requested": components,
-        "formatted_blocks": SCRAPED_CODE_DISCLAIMER.strip() + "\n\n" + "\n\n".join(blocks),
-        "message": "Use the formatted_blocks below as additional reference for the requested component types. (Code is from various repos, not the user's project.)",
-    }
 
 
 # --- Editor tools: executed on the Godot client; backend returns payload only ---
@@ -558,88 +468,6 @@ def get_registered_tools() -> List[ToolDef]:
     This is the single source of truth for backend-side tools for now.
     """
     return [
-        ToolDef(
-            name="search_docs",
-            description="Search the indexed Godot documentation for relevant pages/snippets.",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language query or keywords to search in docs.",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return.",
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
-                    },
-                },
-                "required": ["query"],
-            },
-            handler=_tool_search_docs,
-        ),
-        ToolDef(
-            name="search_project_code",
-            description=(
-                "Search the indexed project_code collection for relevant scripts or shaders. "
-                "Use this to locate concrete examples in the current project."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language description or code keywords.",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional language filter: 'gdscript', 'csharp', or 'gdshader'.",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return.",
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
-                    },
-                },
-                "required": ["query"],
-            },
-            handler=_tool_search_project_code,
-        ),
-        ToolDef(
-            name="request_component_context",
-            description=(
-                "Request more context: full script examples for specific node/component types (extends classes). "
-                "Call this when you need more example code for a component (e.g. CharacterBody2D, Control, Camera3D) "
-                "or when the user asks for more examples. Returns formatted full-script blocks you can use as reference."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "components": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of node types (extends classes), e.g. ['CharacterBody2D', 'Control'].",
-                    },
-                    "language": {
-                        "type": "string",
-                        "description": "Optional: 'gdscript' or 'csharp'.",
-                    },
-                    "max_scripts_per_component": {
-                        "type": "integer",
-                        "description": "Max full scripts to fetch per component (1-5).",
-                        "default": 3,
-                        "minimum": 1,
-                        "maximum": 5,
-                    },
-                },
-                "required": ["components"],
-            },
-            handler=_tool_request_component_context,
-        ),
         # --- Editor tools (executed on Godot client) ---
         ToolDef(
             name="create_file",

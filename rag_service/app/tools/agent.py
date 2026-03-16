@@ -18,12 +18,7 @@ GODOT_AGENT_SYSTEM_PROMPT = (
     "When the user asks to fix a file (e.g. 'fix enemy.gd', 'fix lint errors', 'fix the errors'), call read_file(path) to get the current contents, then use apply_patch(path, old_string, new_string) or write_file(path, content) to apply the fix. "
     "Never respond with only a description of the fix; always call the tools so the changes are applied in the user's Godot editor.\n\n"
     "You are a Godot 4.x development assistant. "
-    "You have access to:\n"
-    "- Retrieved documentation (the 'docs' collection, scraped from the official Godot manuals).\n"
-    "- Retrieved example project code snippets (the 'project_code' collection, non-canonical examples).\n"
-    "- Search tools: 'search_docs' and 'search_project_code' to refine your search. "
-    "If you need full script examples for specific node types (e.g. CharacterBody2D, Control), call 'request_component_context' with those component names.\n"
-    "- Editor tools (executed in the user's Godot editor). Use these first when the user asks to fix or edit a file:\n"
+    "You have access to editor tools (executed in the user's Godot editor). Use these first when the user asks to fix or edit a file:\n"
     "  - read_file(path): Call this to read the current contents of any project file (e.g. res://player.gd, res://scripts/enemy.gd). "
     "You WILL receive the full file content in the tool result. Always call read_file when asked to fix or edit a file; do not guess or assume.\n"
     "  - apply_patch(path, old_string, new_string): small targeted edits. Use for fixes: pass the exact old_string to replace and the new_string. Prefer over write_file for edits to existing files.\n"
@@ -47,8 +42,6 @@ GODOT_AGENT_SYSTEM_PROMPT = (
     "- Match 2D vs 3D: the context will say whether the current scene is 2D or 3D. Use only node types that match (e.g. CharacterBody2D in 2D, CharacterBody3D in 3D).\n"
     "- To see what is in a file, call read_file(path). For new files (context may say 'file does not exist'), do not read_file; create with create_script or create_file then write_file.\n"
     "- When the user asks to fix, edit, or lint a specific file by name (e.g. 'fix lint in enemy.gd', 'fix enemy.gd'), you MUST call read_file(res://path) for that file to get its current contents before answering—never assume a file is empty from context. If the path is unclear, use search_files(query, root_path, ['.gd']) or list_files to find it, then read_file.\n"
-    "- Use search_docs / search_project_code when you need more documentation or code examples. "
-    "If context is missing for a component type, or the user asks for more examples, call request_component_context(components=[...]) to get full script examples.\n"
     "- For new files, create_file(path) may have empty content; then write_file(path, content). Never leave a user-visible file as placeholder; use write_file or append_to_file to add the real content.\n"
     "When you are satisfied, return a final answer to the user."
 )
@@ -60,37 +53,6 @@ def _run_tool(ctx: RunContext[GodotQueryDeps], name: str, **kwargs: Any) -> Any:
 
 
 # --- Tool wrappers: same names and parameters as ToolDef for schema compatibility ---
-
-def search_docs(ctx: RunContext[GodotQueryDeps], query: str, top_k: int = 5) -> Any:
-    """Search the indexed Godot documentation for relevant pages/snippets."""
-    return _run_tool(ctx, "search_docs", query=query, top_k=top_k)
-
-
-def search_project_code(
-    ctx: RunContext[GodotQueryDeps],
-    query: str,
-    language: Optional[str] = None,
-    top_k: int = 5,
-) -> Any:
-    """Search the indexed project_code collection for relevant scripts or shaders."""
-    return _run_tool(ctx, "search_project_code", query=query, language=language, top_k=top_k)
-
-
-def request_component_context(
-    ctx: RunContext[GodotQueryDeps],
-    components: List[str],
-    language: Optional[str] = None,
-    max_scripts_per_component: int = 3,
-) -> Any:
-    """Request full script examples for specific node/component types (extends classes)."""
-    return _run_tool(
-        ctx,
-        "request_component_context",
-        components=components,
-        language=language,
-        max_scripts_per_component=max_scripts_per_component,
-    )
-
 
 def create_file(
     ctx: RunContext[GodotQueryDeps],
@@ -416,9 +378,6 @@ def check_errors(ctx: RunContext[GodotQueryDeps]) -> Any:
 
 # All tools in the same order as get_registered_tools() for consistency.
 GODOT_AGENT_TOOLS = [
-    search_docs,
-    search_project_code,
-    request_component_context,
     create_file,
     write_file,
     append_to_file,

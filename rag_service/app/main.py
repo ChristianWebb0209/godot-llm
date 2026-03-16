@@ -13,13 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .rag_core import (
-    SourceChunk,
-    _collect_code_by_extends,
-    _collect_code_results,
-    _collect_top_docs,
-    get_collections,
-)
+from .rag_core import SourceChunk, get_collections
 from .services.repo_indexing import (
     get_inbound_refs,
     get_most_referenced_res_paths,
@@ -52,7 +46,6 @@ from .services.context.context_builder import (
     build_related_files_context,
     blocks_to_user_content,
     extract_extends_from_script,
-    format_component_scripts_block,
     get_context_limit,
     list_project_files,
     read_project_file,
@@ -332,46 +325,6 @@ def _extract_tool_calls_from_pydantic_result(result: Any) -> List[ToolCallResult
     return out
 
 
-# Path keywords -> Chroma component_type values (must match analyze_project indexing).
-# Index stores role (e.g. basic_enemy_ai) or first tag (e.g. enemy); we pass both so retrieval finds all.
-_PATH_TO_COMPONENT_TYPES: List[Tuple[str, ...]] = [
-    ("enemy", "basic_enemy_ai"),  # path has enemy/mob/ai
-    ("player", "2d_player_controller"),
-    ("ui", "pause_menu_ui"),
-    ("editor", "editor_plugin"),
-    ("main",),
-    ("level",),
-]
-_PATH_KEYWORDS_FOR_HINT: List[Tuple[str, str]] = [
-    ("enemy", "enemy"), ("mob", "enemy"), ("ai", "enemy"),
-    ("player", "player"), ("hero", "player"),
-    ("menu", "ui"), ("ui", "ui"), ("hud", "ui"), ("pause", "ui"),
-    ("editor", "editor"),
-    ("main", "main"), ("game", "main"),
-    ("level", "level"), ("world", "level"), ("map", "level"),
-]
-
-
-def path_to_component_types(active_file_path: Optional[str]) -> Optional[List[str]]:
-    """
-    Derive Chroma component_type filter from the active file path so we retrieve
-    relevant examples (e.g. enemy scripts when the user is editing a file with 'enemy' in the path).
-    Returns a list of component_type values to pass to _collect_code_results(component_types=...).
-    """
-    if not active_file_path or not isinstance(active_file_path, str):
-        return None
-    path_lower = active_file_path.lower().strip()
-    if path_lower.startswith("res://"):
-        path_lower = path_lower[6:].lstrip("/")
-    for keyword, bucket in _PATH_KEYWORDS_FOR_HINT:
-        if keyword in path_lower:
-            for tup in _PATH_TO_COMPONENT_TYPES:
-                if tup[0] == bucket:
-                    return list(tup)
-            return [bucket]
-    return None
-
-
 def _call_llm_with_rag(
     question: str,
     context_language: Optional[str],
@@ -517,46 +470,22 @@ def _run_query_with_tools(
     client, model = _openai_client_and_model(
         api_key=api_key, base_url=base_url, model=model_override
     )
-    # Component-type hint from active file path (e.g. enemy in path -> retrieve enemy examples).
-    active_script_for_rag = request_context.current_script if request_context else None
-    component_types_from_path = path_to_component_types(active_script_for_rag)
-
-    # If there is no LLM, fall back to the existing RAG-only path.
+    # If there is no LLM, return a short message (no RAG).
     if client is None:
-        docs = _collect_top_docs(question, top_k=top_k)
-        code_snippets = _collect_code_results(
-            question=question,
-            language=context_language,
-            top_k=top_k,
-            component_types=component_types_from_path,
-        )
-        is_obscure = len(code_snippets) < max(1, top_k // 3)
-        answer = _call_llm_with_rag(
-            question=question,
-            context_language=context_language,
-            docs=docs,
-            code_snippets=code_snippets,
-            is_obscure=is_obscure,
-        )
         usage_obj = build_context_usage(model, [question])
-        return answer, docs + code_snippets, [], {
-            "model": usage_obj.model,
-            "limit_tokens": usage_obj.limit_tokens,
-            "estimated_prompt_tokens": usage_obj.estimated_prompt_tokens,
-            "percent": usage_obj.percent,
-        }
+        return (
+            "OpenAI client not configured. Set OPENAI_API_KEY (or pass api_key in the request) to use the assistant.",
+            [],
+            [],
+            {
+                "model": usage_obj.model,
+                "limit_tokens": usage_obj.limit_tokens,
+                "estimated_prompt_tokens": usage_obj.estimated_prompt_tokens,
+                "percent": 0.0,
+            },
+        )
 
-    # Initial RAG step (bias code retrieval by active file path, e.g. enemy examples when editing enemy script).
-    docs = _collect_top_docs(question, top_k=top_k)
-    code_snippets = _collect_code_results(
-        question=question,
-        language=context_language,
-        top_k=top_k,
-        component_types=component_types_from_path,
-    )
-    is_obscure = len(code_snippets) < max(1, top_k // 3)
-
-    # --- Context builder (Stage 2): ordered blocks + budgets ---
+    # --- Context builder: ordered blocks + budgets (no docs/code RAG) ---
     # (Agent system instructions live in godot_agent.GODOT_AGENT_SYSTEM_PROMPT.)
 
     # Extract active file info from request context (sent by the Godot editor).
@@ -659,16 +588,8 @@ def _run_query_with_tools(
     except Exception:
         pass
 
-    retrieved_docs = [
-        "Official docs snippet:\n"
-        f"[DOC] path={d.source_path} meta={d.metadata}\n{d.text_preview}\n"
-        for d in docs
-    ]
-    retrieved_code = [
-        "Example project code snippet:\n"
-        f"[CODE] path={s.source_path} meta={s.metadata}\n{s.text_preview}\n"
-        for s in code_snippets
-    ]
+    retrieved_docs: List[str] = []
+    retrieved_code: List[str] = []
     # Build dedicated ENVIRONMENT block (high priority, never dropped).
     environment_parts: List[str] = []
     # Context legend: so the LLM knows what it's dealing with (user's project vs reference).
@@ -676,8 +597,6 @@ def _run_query_with_tools(
         "CONTEXT SOURCES: "
         "'Active file' = the file currently focused in the Godot editor (user's project, res:// path). "
         "'Related files' / 'Current scene scripts' / 'Open in editor' = also the user's project. "
-        "'Retrieved documentation' = official Godot docs. "
-        "'Retrieved project code' / 'Example scripts by type' = from other indexed repos (reference only, not the user's project). "
         "When editing or fixing a file, use the path shown (e.g. res://enemy.gd); call read_file(path) if you need full content."
     )
     if engine_version:
@@ -842,71 +761,7 @@ def _run_query_with_tools(
     # Component/class context: when the user has a node type selected, inject its docs so the LLM knows properties for modify_attribute.
     # Include base class docs for custom/obscure types (e.g. class_name Player extends CharacterBody2D -> also fetch CharacterBody2D docs).
     selected_node_base_type: Optional[str] = None
-    if request_context and request_context.extra:
-        selected_node_base_type = (request_context.extra.get("selected_node_base_type") or "").strip() or None
-    types_to_doc: List[str] = []
-    if selected_node_type:
-        types_to_doc.append(selected_node_type)
-    if selected_node_base_type and selected_node_base_type != selected_node_type:
-        types_to_doc.append(selected_node_base_type)
-    for node_type_name in types_to_doc:
-        try:
-            class_docs = _collect_top_docs(
-                f"{node_type_name} class properties methods documentation",
-                top_k=2,
-            )
-            if class_docs:
-                class_parts = [
-                    f"[DOC] path={d.source_path}\n{d.text_preview}"
-                    for d in class_docs
-                ]
-                optional_extras.append(
-                    f"Documentation for node type ({node_type_name}), use for modify_attribute(target_type='node', ...):\n"
-                    + "\n\n".join(class_parts)
-                )
-        except Exception:
-            pass
-
-    # Extends to fetch: from question, scene root, active file, and current scene scripts (aggressive matching).
-    extends_to_fetch: List[str] = []
-    q_lower = question.lower().strip()
-    for cls in ("CharacterBody3D", "CharacterBody2D", "Camera3D", "Camera2D", "Node3D", "Node2D", "RigidBody3D"):
-        if cls.lower() in q_lower:
-            extends_to_fetch.append(cls)
-    if not any(c in extends_to_fetch for c in ("CharacterBody3D", "CharacterBody2D")):
-        if scene_dimension == "3d" or "3d" in q_lower or "first person" in q_lower or "fps" in q_lower:
-            if "player" in q_lower or "character" in q_lower or "controller" in q_lower or "movement" in q_lower:
-                extends_to_fetch.append("CharacterBody3D")
-        if scene_dimension == "2d":
-            if "player" in q_lower or "character" in q_lower or "controller" in q_lower or "movement" in q_lower:
-                extends_to_fetch.append("CharacterBody2D")
-    if "camera" in q_lower and "Camera3D" not in extends_to_fetch and "Camera2D" not in extends_to_fetch:
-        extends_to_fetch.append("Camera3D" if (scene_dimension == "3d" or "3d" in q_lower) else "Camera2D")
-    # From current project: active script and scene scripts (so we attach repo examples of same type).
-    lang = "gdscript" if (context_language or "").strip().lower() != "csharp" else "csharp"
-    if active_file_text and active_file_text.strip():
-        ext = extract_extends_from_script(active_file_text, lang)
-        if ext and ext not in extends_to_fetch:
-            extends_to_fetch.append(ext)
-    if scene_root_class and scene_root_class not in extends_to_fetch:
-        extends_to_fetch.append(scene_root_class)
-    for _path, content in current_scene_scripts:
-        ext = extract_extends_from_script(content, lang)
-        if ext and ext not in extends_to_fetch:
-            extends_to_fetch.append(ext)
-    extends_to_fetch = list(dict.fromkeys(extends_to_fetch))
-
-    # Build component_scripts block (repo examples by type). Dropped first when context >50% full.
-    component_scripts_parts = []
-    for extends_class in extends_to_fetch:
-        try:
-            component_scripts = _collect_code_by_extends(extends_class, language=lang, max_scripts=2)
-            block = format_component_scripts_block(extends_class, component_scripts)
-            if block:
-                component_scripts_parts.append(block)
-        except Exception:
-            pass
-    component_scripts_text = "\n".join(component_scripts_parts) if component_scripts_parts else None
+    component_scripts_text: Optional[str] = None
 
     # OpenViking: retrieve session memories for this chat (when chat_id present).
     retrieved_memories: List[str] = []
@@ -940,7 +795,7 @@ def _run_query_with_tools(
         retrieved_memories=retrieved_memories if retrieved_memories else None,
     )
     limit = get_context_limit(model)
-    # When context fills over 50%, drop lowest-priority blocks first (component_scripts, extras).
+    # When context fills over 50%, drop lowest-priority blocks first (extras).
     user_content, _dbg = blocks_to_user_content(
         blocks, limit=limit, reserve=4096, fill_target_ratio=0.5
     )
@@ -950,10 +805,6 @@ def _run_query_with_tools(
     context_decision_log.append(
         f"Context limit: {limit} tokens; reserve: 4096; target cap: 50% fill"
     )
-    if component_types_from_path:
-        context_decision_log.append(
-            f"Active file path suggests component types: {', '.join(component_types_from_path)} → code retrieval biased to these examples"
-        )
     context_decision_log.extend(_dbg.get("log", []))
     user_content += (
         "\n\n[AGENT MODE: When the user asks to fix or edit a file, you MUST call read_file(path) then apply_patch(path, old_string, new_string) or write_file(path, content). Do not only describe the fix.]\n"
@@ -1624,64 +1475,21 @@ async def query_stream(payload: QueryRequest, request: Request):
     question = payload.question.strip()
     context_language = payload.context.language if payload.context else None
 
-    docs = _collect_top_docs(question, top_k=payload.top_k)
-    code_snippets = _collect_code_results(
-        question=question,
-        language=context_language,
-        top_k=payload.top_k,
-    )
-    is_obscure = len(code_snippets) < max(1, payload.top_k // 3)
-
     client, model = _openai_client_and_model(
         api_key=payload.api_key,
         base_url=payload.base_url,
         model=payload.model,
     )
 
-    # Build the same structured context we use in _call_llm_with_rag.
-    docs_block_lines: List[str] = []
-    for d in docs:
-        docs_block_lines.append(
-            "Official docs snippet from the Godot 4.x manual:\n"
-            f"[DOC] path={d.source_path} meta={d.metadata}\n{d.text_preview}\n"
-        )
-    code_block_lines: List[str] = []
-    for s in code_snippets:
-        code_block_lines.append(
-            "Example project code snippet (not canonical API, use as inspiration only):\n"
-            f"[CODE] path={s.source_path} meta={s.metadata}\n{s.text_preview}\n"
-        )
-
     system_prompt = (
         "You are a Godot 4.x development assistant. "
-        "You receive a user question plus retrieved documentation and real project code. "
-        "The 'docs' collection is scraped from the official Godot manuals and is the "
-        "authoritative source for engine behavior and APIs. The 'project_code' collection "
-        "contains example scripts and shaders from a wide range of different open-source repos "
-        "(not the user's project); they may reference project-specific types, addons, or paths. "
-        "Treat them only as patterns and inspiration, not as canonical definitions or as code from the user's project. "
-        "Use ONLY the provided context to answer. Prefer documentation when there is any "
-        "conflict between docs and project code. Prefer higher-importance code snippets "
-        "when multiple examples are relevant, but you may also rely on lower-importance "
-        "snippets if the topic appears niche or under-documented. "
-        "When writing code examples, default to the user's preferred language if given."
+        "Answer the user's question. When writing code examples, use the user's preferred language if given."
     )
 
     user_prompt_lines: List[str] = []
     user_prompt_lines.append(f"Question: {question}\n")
     if context_language:
         user_prompt_lines.append(f"Preferred language: {context_language}\n")
-    if is_obscure:
-        user_prompt_lines.append(
-            "Heuristic: This seems like a more obscure area of the codebase; "
-            "lower-importance snippets may also be relevant.\n"
-        )
-    if docs_block_lines:
-        user_prompt_lines.append("\n=== Documentation Context ===\n")
-        user_prompt_lines.extend(docs_block_lines)
-    if code_block_lines:
-        user_prompt_lines.append("\n=== Project Code Context ===\n")
-        user_prompt_lines.extend(code_block_lines)
     user_prompt_lines.append(
         "\nPlease stream back your final answer text. It should already include any "
         "reasoning and code examples as appropriate.\n"
@@ -1696,16 +1504,7 @@ async def query_stream(payload: QueryRequest, request: Request):
 
     if client is None:
         def fallback_iter():
-            text = _call_llm_with_rag(
-                question=question,
-                context_language=context_language,
-                docs=docs,
-                code_snippets=code_snippets,
-                is_obscure=is_obscure,
-                client=client,
-                model=model,
-            )
-            yield text
+            yield "OpenAI client not configured. Set OPENAI_API_KEY to use the assistant."
 
         return StreamingResponse(fallback_iter(), media_type="text/plain; charset=utf-8")
 
