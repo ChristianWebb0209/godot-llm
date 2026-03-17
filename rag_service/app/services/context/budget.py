@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Priority hierarchy (lower = more important, dropped last when context fills).
 # Order: env → task → session_memory → active_file → current_scene_scripts → related
-# → recent → errors → knowledge → component_scripts → extras
+# → recent → errors → extras
 PRIORITY_ENV = 0
 PRIORITY_TASK = 1
 PRIORITY_SESSION_MEMORY = 2
@@ -18,9 +18,7 @@ PRIORITY_CURRENT_SCENE_SCRIPTS = 4
 PRIORITY_RELATED = 5
 PRIORITY_RECENT = 6
 PRIORITY_ERRORS = 7
-PRIORITY_KNOWLEDGE = 8
-PRIORITY_COMPONENT_SCRIPTS = 9  # First to drop when >50% full
-PRIORITY_EXTRAS = 10
+PRIORITY_EXTRAS = 8
 
 MODEL_CONTEXT_LIMITS: Dict[str, int] = {
     "gpt-4.1-mini": 32768,
@@ -149,7 +147,7 @@ def blocks_to_user_content(
     """
     Trim each block to its budget; drop lowest-priority blocks until total <= target_cap.
     target_cap = (limit - reserve) * fill_target_ratio. When fill_target_ratio is 0.5,
-    context is capped at 50% so the first things dropped are component_scripts, extras.
+    context is capped at 50% so the first things dropped are extras.
     Returns (user_content, debug_info). debug_info includes "log": [str] for the context decision log.
     """
     rendered: List[str] = []

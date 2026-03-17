@@ -88,7 +88,7 @@ Important subpaths:
 
 ---
 
-## 3. Backend & RAG (`rag_service/app/main.py`)
+## 3. Backend (`rag_service/app/main.py`)
 
 ### 3.1 FastAPI Endpoints
 
@@ -153,49 +153,17 @@ Important subpaths:
 > a warning, instead of crashing. To fully change embeddings, delete
 > `rag_service/data/chroma_db/` and re-run the indexers (see §4.3).
 
-### 3.4 Retrieval Strategy
+### 3.4 Retrieval Strategy (legacy; disabled)
 
-- Docs retrieval (`_collect_top_docs`):
-  - Queries `docs` collection with `query_texts=[question]`, `n_results=top_k`.
-  - Wraps results as `SourceChunk` with path + metadata.
+The backend previously supported Chroma-based retrieval from:
 
-- Code retrieval (`_collect_code_results`):
-  - Queries `project_code` in **importance tiers**:
-    - Tier 1: `importance >= 0.6`.
-    - Tier 2: `importance >= 0.3`.
-    - Tier 3: `importance >= 0.0`.
-  - Filters by `language` if provided.
-  - Dedupes IDs across tiers.
-  - Stops once `top_k` snippets gathered.
+- `docs` (official Godot docs)
+- `project_code` (indexed scripts/shaders from other repos)
 
-- Obscure topic heuristic:
-  - If `len(code_snippets) < max(1, top_k // 3)`:
-    - `is_obscure = True`.
-    - LLM is told that this is a more niche area, so lower-importance code was used.
+That retrieval is **disabled** in the current `/query` “tools loop” path; the model relies on:
 
-- Answer generation (`_call_llm_with_rag`):
-  - If OpenAI client exists:
-    - System prompt instructs:
-      - Use only provided docs/code.
-      - Prefer higher-importance code when multiple snippets match.
-      - Explain reasoning and reference paths + tags.
-      - Use user’s preferred language for code examples.
-    - User message includes:
-      - Question, preferred language.
-      - Obscure flag (if true).
-      - `=== Documentation Context ===` with `[DOC] path=... meta=...`.
-      - `=== Project Code Context ===` with `[CODE] path=... meta=...`.
-    - LLM asked to respond with:
-      1. Concise answer.
-      2. `Reasoning` section.
-      3. Code examples in preferred language.
-  - If no OpenAI client:
-    - Returns a verbose string summarizing:
-      - Question.
-      - Preferred language.
-      - Relevant docs (paths).
-      - Relevant code snippets (paths, importance, tags).
-      - Obscure note (if applicable).
+- The user’s **active file**, **related files**, and **current scene scripts** (server-read from the project when `project_root_abs` is provided)
+- Optional **conversation_history** and **OpenViking session memory**
 
 ### 3.6 Tools & Orchestration (`rag_service/app/services/tools.py`)
 
@@ -359,8 +327,8 @@ Both backend and tools now share identical embedding configuration logic via `.e
 ## 7. Context builder (efficient prompt assembly)
 
 - Goal: only send what’s necessary; stable ordering; budget-aware trimming.
-- Model context limits in `rag_service/app/context_builder.py` (e.g. `gpt-4.1-mini` → 32768). Blocks ordered by priority; when context fills past ~50%, lowest-priority blocks (component_scripts, extras) are dropped first.
-- Block order: System → Current task → Active file → Current scene scripts → Related files → Recent edits → Errors → Retrieved knowledge → Component scripts (by extends) → Optional extras.
+- Model context limits in `rag_service/app/context_builder.py` (e.g. `gpt-4.1-mini` → 32768). Blocks ordered by priority; when context fills past ~50%, lowest-priority blocks (extras) are dropped first.
+- Block order: System → Current task → Retrieved session memory → Active file → Current scene scripts → Related files → Recent edits → Errors → Optional extras.
 - **Conversation history**: Plugin sends `context.extra.conversation_history` (last N user/assistant turns). Backend calls `build_conversation_context()` and appends to optional extras so the model has multi-turn continuity.
 - **Active file**: Plugin sends `current_script` and `extra.active_file_text`; always sends `extra.project_root_abs`. If active file text is missing, backend reads from disk.
 - **Related files**: When `project_root_abs` is set, uses repo index `get_related_res_paths` (outbound + inbound) and “project core” (`get_most_referenced_res_paths`), then reads those files into the Related files block. One-off index run if project not indexed (§8).

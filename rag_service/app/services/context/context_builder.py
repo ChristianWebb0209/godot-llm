@@ -5,8 +5,6 @@ Areas of concern live in app.services.context:
   - budget: token limits, trimming, priority hierarchy, when to remove context
   - scene: current scene parsing, scene scripts, extends extraction
   - project: project file read/list, related files (repo-index or heuristic)
-  - docs: formatting retrieved documentation into knowledge block
-  - code_samples: formatting repo code-by-extends into component block
   - conversation: optional chat history (when plugin sends it)
 
 This module composes them and exposes the same public API for main.py.
@@ -16,12 +14,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import (
     PRIORITY_ACTIVE_FILE,
-    PRIORITY_COMPONENT_SCRIPTS,
     PRIORITY_CURRENT_SCENE_SCRIPTS,
     PRIORITY_ENV,
     PRIORITY_ERRORS,
     PRIORITY_EXTRAS,
-    PRIORITY_KNOWLEDGE,
     PRIORITY_RECENT,
     PRIORITY_RELATED,
     PRIORITY_SESSION_MEMORY,
@@ -30,13 +26,11 @@ from . import (
     ContextUsage,
     build_context_usage,
     build_current_scene_scripts_context,
-    build_knowledge_block_parts,
     build_related_files_context,
     blocks_to_user_content,
     extract_extends_from_script,
     estimate_tokens,
     fit_block_text,
-    format_component_scripts_block,
     get_context_limit,
     list_project_files,
     parse_tscn_script_paths,
@@ -53,22 +47,19 @@ def build_ordered_blocks(
     active_file_path: Optional[str],
     active_file_text: Optional[str],
     errors_text: Optional[str],
-    retrieved_docs: List[str],
-    retrieved_code: List[str],
     related_files: List[Tuple[str, str]],
     recent_edits: List[str],
     optional_extras: List[str],
     include_system_in_user: bool = False,
     environment_text: Optional[str] = None,
     current_scene_scripts: Optional[List[Tuple[str, str]]] = None,
-    component_scripts_text: Optional[str] = None,
     exclude_block_keys: Optional[List[str]] = None,
     retrieved_memories: Optional[List[str]] = None,
 ) -> List[ContextBlock]:
     """
     Compose all context sources into ordered blocks (priority hierarchy).
     Hierarchy: env → task → session_memory → active file → current scene scripts → related
-    → recent edits → errors → knowledge (docs + code) → component_scripts → extras.
+    → recent edits → errors → extras.
     exclude_block_keys: block keys to omit (from context viewer "Don't include next time").
     retrieved_memories: optional OpenViking session memory snippets for this chat.
     """
@@ -83,8 +74,6 @@ def build_ordered_blocks(
     related_budget = min(4500, max(1000, int(limit * 0.14)))
     recent_budget = min(2000, max(400, int(limit * 0.06)))
     err_budget = min(3200, max(600, int(limit * 0.10)))
-    know_budget = min(7500, max(1500, int(limit * 0.22)))
-    component_budget = min(6000, max(1500, int(limit * 0.18)))
     extra_budget = min(2400, max(400, int(limit * 0.08)))
 
     blocks: List[ContextBlock] = []
@@ -203,29 +192,6 @@ def build_ordered_blocks(
             )
         )
 
-    knowledge_parts = build_knowledge_block_parts(retrieved_docs, retrieved_code)
-    if knowledge_parts:
-        blocks.append(
-            ContextBlock(
-                key="knowledge",
-                title="Retrieved knowledge",
-                priority=PRIORITY_KNOWLEDGE + off,
-                max_tokens=know_budget,
-                text="\n".join(knowledge_parts).strip(),
-            )
-        )
-
-    if component_scripts_text and component_scripts_text.strip() and "component_scripts" not in excluded:
-        blocks.append(
-            ContextBlock(
-                key="component_scripts",
-                title="Example scripts by type (from code repos)",
-                priority=PRIORITY_COMPONENT_SCRIPTS + off,
-                max_tokens=component_budget,
-                text=component_scripts_text.strip(),
-            )
-        )
-
     if optional_extras and "extras" not in excluded:
         blocks.append(
             ContextBlock(
@@ -250,7 +216,6 @@ __all__ = [
     "extract_extends_from_script",
     "estimate_tokens",
     "fit_block_text",
-    "format_component_scripts_block",
     "get_context_limit",
     "list_project_files",
     "parse_tscn_script_paths",

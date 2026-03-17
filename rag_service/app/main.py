@@ -69,6 +69,7 @@ from .services.context.openviking_context import (
     find_memories as openviking_find_memories,
 )
 from .services.console_service import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
+from .prompts import COMPOSER_SYSTEM_PROMPT
 
 
 load_dotenv()  # Load environment variables from .env if present.
@@ -486,7 +487,7 @@ def _run_query_with_tools(
         )
 
     # --- Context builder: ordered blocks + budgets (no docs/code RAG) ---
-    # (Agent system instructions live in godot_agent.GODOT_AGENT_SYSTEM_PROMPT.)
+    # (Agent system instructions live in app.prompts.)
 
     # Extract active file info from request context (sent by the Godot editor).
     active_file_path = None
@@ -588,8 +589,6 @@ def _run_query_with_tools(
     except Exception:
         pass
 
-    retrieved_docs: List[str] = []
-    retrieved_code: List[str] = []
     # Build dedicated ENVIRONMENT block (high priority, never dropped).
     environment_parts: List[str] = []
     # Context legend: so the LLM knows what it's dealing with (user's project vs reference).
@@ -729,6 +728,21 @@ def _run_query_with_tools(
                         parts.append(line)
             if parts:
                 optional_extras.append(drag_intro + "\n\nPinned nodes/scene:\n\n" + "\n".join(parts))
+        pinned_selections_raw = request_context.extra.get("pinned_selections")
+        if pinned_selections_raw and isinstance(pinned_selections_raw, list) and len(pinned_selections_raw) > 0:
+            parts = []
+            for item in pinned_selections_raw[:20]:
+                if isinstance(item, dict):
+                    text_val = (item.get("text") or "").strip()
+                    source_path = (item.get("source_path") or "").strip()
+                    if text_val:
+                        header = "--- Pinned selection (user-dragged/highlighted)"
+                        if source_path:
+                            header += f" from {source_path}"
+                        header += " ---"
+                        parts.append(header + "\n" + text_val)
+            if parts:
+                optional_extras.append(drag_intro + "\n\nPinned selections:\n\n" + "\n\n".join(parts))
     if is_obscure:
         optional_extras.append(
             "Heuristic: This seems like an obscure area; consider lower-importance snippets too."
@@ -761,7 +775,6 @@ def _run_query_with_tools(
     # Component/class context: when the user has a node type selected, inject its docs so the LLM knows properties for modify_attribute.
     # Include base class docs for custom/obscure types (e.g. class_name Player extends CharacterBody2D -> also fetch CharacterBody2D docs).
     selected_node_base_type: Optional[str] = None
-    component_scripts_text: Optional[str] = None
 
     # OpenViking: retrieve session memories for this chat (when chat_id present).
     retrieved_memories: List[str] = []
@@ -782,15 +795,12 @@ def _run_query_with_tools(
         active_file_path=active_file_path,
         active_file_text=active_file_text,
         errors_text=errors_text,
-        retrieved_docs=retrieved_docs,
-        retrieved_code=retrieved_code,
         related_files=related_files,
         recent_edits=recent_edits_text,
         optional_extras=optional_extras,
         include_system_in_user=False,
         environment_text=environment_text,
         current_scene_scripts=current_scene_scripts if current_scene_scripts else None,
-        component_scripts_text=component_scripts_text,
         exclude_block_keys=exclude_block_keys,
         retrieved_memories=retrieved_memories if retrieved_memories else None,
     )
@@ -894,11 +904,7 @@ def _run_composer_query(
         )
 
     extra = (request_context.extra or {}) if request_context else {}
-    system_prompt = (
-        "You are a Godot assistant. Use the available tools when needed. "
-        "When you need to perform an action, respond with optional text and a JSON array of tool calls on one line: "
-        '[{"name": "tool_name", "arguments": {...}}, ...]. Use res:// paths for Godot project files.'
-    )
+    system_prompt = COMPOSER_SYSTEM_PROMPT
     user_parts: List[str] = [question]
     if extra.get("active_file_text"):
         user_parts.append("Current file content:\n" + str(extra["active_file_text"]))
@@ -1483,7 +1489,8 @@ async def query_stream(payload: QueryRequest, request: Request):
 
     system_prompt = (
         "You are a Godot 4.x development assistant. "
-        "Answer the user's question. When writing code examples, use the user's preferred language if given."
+        "Answer the user's question. When writing code examples, use the user's preferred language if given. "
+        "Show your reasoning: first output your thinking inside <think>...</think> tags (what you are considering, what you will do), then your final answer after the closing tag."
     )
 
     user_prompt_lines: List[str] = []
@@ -1491,8 +1498,7 @@ async def query_stream(payload: QueryRequest, request: Request):
     if context_language:
         user_prompt_lines.append(f"Preferred language: {context_language}\n")
     user_prompt_lines.append(
-        "\nPlease stream back your final answer text. It should already include any "
-        "reasoning and code examples as appropriate.\n"
+        "\nStream your response: first <think>...</think> with your reasoning, then your final answer (with any code examples) after the closing tag.\n"
     )
 
     messages = [

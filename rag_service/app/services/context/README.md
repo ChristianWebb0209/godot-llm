@@ -7,8 +7,6 @@ Context building is split by concern:
 | **budget** | Token estimation, per-block trim/compress, priority hierarchy, when to remove context (fill_target_ratio, drop lowest-priority blocks). |
 | **scene** | Current scene: parse .tscn for script paths, load scene scripts, extract `extends` from script content. |
 | **project** | Current project: read/list files, structural deps, related files (repo-index or heuristic). |
-| **docs** | Retrieved documentation: format docs + code snippets into the single “knowledge” block. |
-| **code_samples** | Repo code by type: format full script implementations by `extends_class` (component block). |
 | **conversation** | Optional chat history: when the plugin sends recent turns, format them for context. |
 | **openviking_context** | Per-chat session memory (OpenViking): commit turns for memory extraction, retrieve relevant memories via `find_memories` for the "Retrieved session memory" block. |
 | **viewer** | Build a display model from blocks + debug for the context viewer UI (per-chat); used to send `context_view` in the response. |
