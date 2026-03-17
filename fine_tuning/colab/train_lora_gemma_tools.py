@@ -374,7 +374,7 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
 
     Checkpoint behavior is configurable via environment variables:
     - CHECKPOINT_DIR:          output directory for checkpoints (default: "./godot-tools-lora")
-    - CHECKPOINT_STEPS:        save checkpoint every N steps        (default: "200")
+    - CHECKPOINT_STEPS:        save checkpoint every N steps        (default: "50")
     - CHECKPOINT_TOTAL_LIMIT:  keep at most N checkpoints on disk   (default: "3")
 
     To resume from a checkpoint after interrupt: call
@@ -383,9 +383,9 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     """
     output_dir = os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")
     try:
-        save_steps = int(os.environ.get("CHECKPOINT_STEPS", "200"))
+        save_steps = int(os.environ.get("CHECKPOINT_STEPS", "50"))
     except ValueError:
-        save_steps = 200
+        save_steps = 50
     try:
         save_total_limit = int(os.environ.get("CHECKPOINT_TOTAL_LIMIT", "3"))
     except ValueError:

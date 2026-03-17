@@ -23,7 +23,6 @@ Usage:
 # - Make sure GPU is enabled (Runtime → Change runtime type → GPU).
 # - Clone (or pull) the repo into `/content/godot-llm`.
 
-
 import os
 from pathlib import Path
 
@@ -41,26 +40,103 @@ else:
     print("Not in Colab; please ensure the working directory is the repo root.")
 
 
-# ## 1. Install Python dependencies
+# ## 0b. Persistent outputs (Google Drive) + auto-resume
 #
-# We pin numpy<2 and trl==0.9.6 so SFTTrainer(tokenizer=...) works. We use
-# transformers 4.48.x (4.46.0 is yanked). Pip may warn about other Colab
-# packages (tensorflow, numba, etc.); those can be ignored.
+# Colab runtimes can reset and wipe `/content`. To avoid losing long runs, we:
+# - Mount Google Drive.
+# - Save checkpoints to Drive (so training can resume automatically).
+# - Save the final adapter to Drive.
+#
+# You can override the default Drive folder by setting:
+#   %env DRIVE_RUN_DIR=/content/drive/MyDrive/some/other/folder
+#
+
+IN_COLAB = Path("/content").exists()
+DRIVE_RUN_DIR = Path(os.environ.get("DRIVE_RUN_DIR", "/content/drive/MyDrive/godot-tools-lora")).resolve()
+DEPS_MARKER = DRIVE_RUN_DIR / ".deps_ok"
+
+if IN_COLAB:
+    try:
+        from google.colab import drive  # type: ignore
+
+        drive.mount("/content/drive", force_remount=False)
+        DRIVE_RUN_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Make checkpoint saving persistent + enable auto-resume by default.
+        os.environ["CHECKPOINT_DIR"] = str(DRIVE_RUN_DIR / "checkpoints")
+        os.environ["RESUME_FROM_CHECKPOINT"] = "auto"
+        # Increase save frequency (default was 200, but on slow Colab runs it might crash before).
+        os.environ["CHECKPOINT_STEPS"] = "50"
+    except Exception as e:
+        print(
+            "WARNING: Could not mount Google Drive. "
+            "Checkpoints/adapters will be saved under /content and may be lost on reset.\n"
+            f"Drive mount error: {e}"
+        )
 
 
-!pip uninstall -y transformers || true
+# ## 1. Install Python dependencies (robust Colab / Py3.12)
+#
+# Colab often comes with preinstalled packages that conflict with this stack.
+# If you see errors like:
+#   - "numpy.dtype size changed, may indicate binary incompatibility"
+#   - datasets/fsspec version conflicts
+# this cell force-reinstalls a consistent set of versions and then restarts
+# the runtime ONCE so compiled wheels line up with the pinned numpy version.
+#
+# NOTE: Pip may warn about other Colab packages (jax/opencv/etc). That's OK for
+# our training environment; we only need the HF/TRL stack to be consistent.
 
-!pip install -q "numpy<2.0" \
-  "trl==0.9.6" \
-  "transformers>=4.48.0,<4.49" \
-  accelerate==0.34.2 \
-  datasets==3.0.0 \
-  peft==0.13.0 \
-  bitsandbytes==0.43.3 \
-  sentencepiece \
-  einops \
-  jedi \
-  "fsspec<=2024.6.1"
+if IN_COLAB and not DEPS_MARKER.exists():
+    # Uninstall common conflicting packages first (ignore failures).
+    !pip uninstall -y -q transformers numpy fsspec gcsfs datasets pyarrow pandas requests || true
+
+    # Force-reinstall a consistent stack.
+    #
+    # - numpy pinned to 1.26.x to match TRL 0.9.x + many wheels
+    # - fsspec pinned to satisfy datasets==3.0.0 constraint
+    # - transformers pinned <5 (this template uses TRL 0.9.6 APIs)
+    !pip install -q --no-cache-dir --force-reinstall \
+      "numpy==1.26.4" \
+      "pandas==2.2.2" \
+      "requests==2.32.4" \
+      "fsspec==2024.6.1" \
+      "datasets==3.0.0" \
+      "trl==0.9.6" \
+      "transformers>=4.48.0,<4.49" \
+      "accelerate==0.34.2" \
+      "peft==0.13.0" \
+      "bitsandbytes==0.43.3" \
+      sentencepiece \
+      einops \
+      jedi
+
+    # Mark deps installed (persistently, on Drive) and restart the runtime so
+    # imports use the fresh wheels. Colab will show this as a "run failed" /
+    # "kernel restarted" message, but it is expected once after installing deps.
+    DEPS_MARKER.write_text("ok\n", encoding="utf-8")
+    print("Dependencies installed. Restarting runtime now (this is expected once).")
+    try:
+        from google.colab import runtime  # type: ignore
+
+        runtime.restart_runtime()
+    except Exception:
+        import os as _os, signal as _signal
+
+        _os.kill(_os.getpid(), _signal.SIGKILL)
+else:
+    # Non-Colab environments can install deps manually, or rerun without restart.
+    !pip install -q "numpy<2.0" \
+      "trl==0.9.6" \
+      "transformers>=4.48.0,<4.49" \
+      accelerate==0.34.2 \
+      datasets==3.0.0 \
+      peft==0.13.0 \
+      bitsandbytes==0.43.3 \
+      sentencepiece \
+      einops \
+      jedi \
+      "fsspec<=2024.6.1"
 
 
 # ## 1b. Troubleshooting: bitsandbytes CUDA / triton (run if model load fails)
@@ -249,7 +325,11 @@ else:
         )
     trainer.train()
 
-adapter_out_dir = "godot-tools-lora-adapter"
+adapter_out_dir = (
+    (DRIVE_RUN_DIR / "adapter").as_posix()
+    if (IN_COLAB and str(DRIVE_RUN_DIR).startswith("/content/drive/"))
+    else "godot-tools-lora-adapter"
+)
 trainer.model.save_pretrained(adapter_out_dir)
 tokenizer.save_pretrained(adapter_out_dir)
 print(f"Saved LoRA adapter to: {adapter_out_dir}")
