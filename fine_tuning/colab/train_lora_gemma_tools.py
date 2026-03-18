@@ -401,17 +401,11 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     (uses latest checkpoint in output_dir, e.g. ./godot-tools-lora/checkpoint-200).
     """
     output_dir = os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")
-    try:
-        save_steps = int(os.environ.get("CHECKPOINT_STEPS", "50"))
-    except ValueError:
-        save_steps = 50
-    try:
-        save_total_limit = int(os.environ.get("CHECKPOINT_TOTAL_LIMIT", "3"))
-    except ValueError:
-        save_total_limit = 3
+    save_steps = 50
+    save_total_limit = 3
 
     training_args = TrainingArguments(
-        output_dir=output_dir,
+        output_dir=os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora"),
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=8,
@@ -423,7 +417,7 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         eval_strategy="steps",
         eval_steps=100,
         save_strategy="steps",
-        save_steps=save_steps,
+        save_steps=int(os.environ.get("CHECKPOINT_STEPS", 50)),
         save_total_limit=save_total_limit,
         bf16=False,
         fp16=True,
