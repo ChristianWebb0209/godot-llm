@@ -29,14 +29,19 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 import torch
-from datasets import load_dataset, Dataset, DatasetDict, interleave_datasets
+
+# Enable TF32 for free speedup on Ampere/Turing GPUs
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
+from datasets import load_dataset, Dataset, DatasetDict, interleave_datasets, concatenate_datasets
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
     TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from trl import SFTTrainer
 
 
@@ -141,7 +146,7 @@ def safe_concat(datasets: List[Dataset]) -> Dataset:
         raise ValueError("No non-empty datasets to concatenate")
     if len(non_empty) == 1:
         return non_empty[0]
-    return Dataset.concatenate_non_empty_datasets(non_empty)  # type: ignore[attr-defined]
+    return concatenate_datasets(non_empty)
 
 
 # ======================================================================
@@ -178,6 +183,8 @@ turn. This trains the model to emit the correct JSON shape as plain text.
 def format_messages_example(example: Dict[str, Any]) -> str:
     """Format a messages-style JSON example into a single string (generic template)."""
     msgs = example.get("messages") or []
+    if not msgs:
+        return ""
     parts: List[str] = []
     for m in msgs:
         role = m.get("role")
@@ -224,9 +231,11 @@ def build_mixed_dataset() -> DatasetDict:
     tools_train = load_jsonl_dataset(TOOLS_TRAIN)
     tools_val = load_jsonl_dataset(TOOLS_VAL)
 
+    num_proc = os.cpu_count() or 1
+
     # Format tool-use examples
-    tools_train = tools_train.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=tools_train.column_names)
-    tools_val = tools_val.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=tools_val.column_names)
+    tools_train = tools_train.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=tools_train.column_names, num_proc=num_proc)
+    tools_val = tools_val.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=tools_val.column_names, num_proc=num_proc)
 
     # Optionally add code-style, docs_qa, and forums into train with explicit weights.
     #
@@ -264,17 +273,17 @@ def build_mixed_dataset() -> DatasetDict:
 
     if CODE_STYLE.exists():
         code_ds = load_jsonl_dataset(CODE_STYLE)
-        code_ds = code_ds.map(lambda ex: {"text": format_code_style_example(ex)}, remove_columns=code_ds.column_names)
+        code_ds = code_ds.map(lambda ex: {"text": format_code_style_example(ex)}, remove_columns=code_ds.column_names, num_proc=num_proc)
         train_components.append(("code", code_ds))
 
     if DOCS_QA.exists():
         docs_ds = load_jsonl_dataset(DOCS_QA)
-        docs_ds = docs_ds.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=docs_ds.column_names)
+        docs_ds = docs_ds.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=docs_ds.column_names, num_proc=num_proc)
         train_components.append(("docs", docs_ds))
 
     if FORUMS.exists():
         forums_ds = load_jsonl_dataset(FORUMS)
-        forums_ds = forums_ds.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=forums_ds.column_names)
+        forums_ds = forums_ds.map(lambda ex: {"text": format_messages_example(ex)}, remove_columns=forums_ds.column_names, num_proc=num_proc)
         train_components.append(("forums", forums_ds))
 
     if len(train_components) == 1:
@@ -328,12 +337,15 @@ def load_tokenizer_and_model() -> tuple[AutoTokenizer, AutoModelForCausalLM]:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    attn_impl = "flash_attention_2" if torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8 else "sdpa"
+
     try:
         model = AutoModelForCausalLM.from_pretrained(
             BASE_MODEL_ID,
             quantization_config=bnb_config,
             device_map="auto",
             trust_remote_code=True,
+            attn_implementation=attn_impl,
         )
     except (RuntimeError, ModuleNotFoundError, OSError, ValueError) as e:
         msg = str(e).lower()
@@ -351,11 +363,18 @@ def load_tokenizer_and_model() -> tuple[AutoTokenizer, AutoModelForCausalLM]:
                 torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
                 device_map="auto",
                 trust_remote_code=True,
+                attn_implementation=attn_impl,
             )
         else:
             raise
 
+    model = prepare_model_for_kbit_training(model)
     model = get_peft_model(model, lora_config)
+
+    # CRITICAL FIX for meta tensor issue
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable()
+
     # Required for gradient checkpointing + LoRA: otherwise backward fails with
     # "element 0 of tensors does not require grad".
     model.enable_input_require_grads()
@@ -395,31 +414,32 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         output_dir=output_dir,
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=16,
-        num_train_epochs=2,
+        gradient_accumulation_steps=8,
+        num_train_epochs=1,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
         logging_steps=10,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=100,
         save_strategy="steps",
         save_steps=save_steps,
         save_total_limit=save_total_limit,
-        bf16=torch.cuda.is_available(),
-        fp16=not torch.cuda.is_available(),
+        bf16=False,
+        fp16=True,
         gradient_checkpointing=True,
         report_to="none",
     )
 
     trainer = SFTTrainer(
         model=model,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         train_dataset=dataset["train"],
         eval_dataset=dataset["val"],
         dataset_text_field="text",
-        max_seq_length=1024,
+        max_seq_length=768,
         args=training_args,
+        packing=True,
     )
     return trainer
 
