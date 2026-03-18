@@ -426,7 +426,7 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
 
     trainer = SFTTrainer(
         model=model,
-        processing_class=tokenizer,
+        tokenizer=tokenizer,
         train_dataset=dataset["train"],
         eval_dataset=dataset["val"],
         dataset_text_field="text",
