@@ -1,0 +1,45 @@
+# Refactor `ai_dock.gd` to MVC
+
+This plan covers the remaining tasks described in `REFACTOR_CONTEXT.md` to reduce the size of `ai_dock.gd` below 1000 lines and enforce strict MVC boundaries.
+
+## Proposed Changes
+
+### 1. Settings Tab UI Glue
+- **Issue**: `ai_dock.gd` has many wrapper functions (`_on_settings_changed`, `_refresh_settings_tab_from_config`, etc.) that just forward to `_settings_tab`. 
+- **Change**: Move the signal handlers into `GodotAISettingsTab`. Connect the signals in `ai_dock.gd` `_ready()` directly to `_settings_tab`'s methods (e.g. `settings_model_option.item_selected.connect(_settings_tab.on_settings_model_selected)`). Remove the wrappers from `ai_dock.gd`.
+
+### 2. Changes/History Tab Glue
+- **Issue**: `ai_dock.gd` contains wrappers for `_changes_tab` signals (`_on_pending_item_selected`, `_on_revert_selected_pressed`, `_on_timeline_item_selected`) and editor focus logic (`open_change_in_editor`, `focus_editor_on_file`, `unfocus_timeline_edit`, `focus_on_timeline_edit`).
+- **Change**: 
+  - Connect UI signals directly to `_changes_tab` handlers in `_ready()`.
+  - Extract the editor focus logic (`focus_editor_on_file`, `open_change_in_editor`) into a new helper in the `editor/` directory (e.g. `editor/editor_focus.gd`) or an existing one if available.
+  - Update `GodotAIChangesTab` to call the new editor helper instead of calling `_dock.focus_on_timeline_edit`, etc.
+
+## Final Extraction (`ai_dock.gd` < 1000 lines)
+
+The file size is currently ~1030 lines. The final step is to eliminate unneeded signal handler wrappers and remove proxy methods so that `ai_dock.gd` sits strictly below 1000 lines. 
+
+### 1. Simplify Connections
+- `ai_dock.gd` has many `_on_...` wrappers for signals. These can be bypassed by connecting directly to the respective helpers.
+- Example: Replace `ask_button.pressed.connect(_on_ask_button_pressed)` with `ask_button.pressed.connect(_chat_streaming.on_ask_pressed)`.
+- Other signals to wire directly (where the helper receives self in constructor):
+  - `_on_http_request_completed` -> `_http_handler.on_http_request_completed`
+  - `_on_chat_gui_input` -> `_chat_context_menu_ctrl.on_chat_gui_input`
+  - `_on_chat_context_menu_id_pressed` -> `_chat_context_menu_ctrl.on_menu_id_pressed`
+  - `_on_export_chat_file_selected` -> `_chat_context_menu_ctrl.export_chat_to_path`
+
+### 2. Remove Discarded Proxies
+- After wiring the UI components directly to the helper functions, delete the wrapper functions currently sitting in `ai_dock.gd` (e.g. `_on_ask_button_pressed`).
+
+### 3. Remove General Proxy Functions
+- Methods like `_update_ask_button_state()`, `_render_chat_log()`, `_update_context_usage_label()`, `_update_activity_ui()` only call their respective component classes.
+- Search across the plugin (e.g., `chat_*.gd` and `ai_dock.gd`) and replace references:
+    - `_dock._update_ask_button_state()` -> `_dock._chat_ux.update_ask_button_state()`
+    - `_dock._render_chat_log()` -> `_dock._chat_renderer.render_chat_log()`
+- Once all external callers use the `_dock.<helper_name>.<method>` chain directly (or via a getter), delete those proxies from `ai_dock.gd`.
+
+## Verification Plan
+
+### Automated Tests
+- Run `.\scripts\gdlint.ps1 -Files "..\godot_plugin\addons\godot_ai_assistant\*.gd", "..\godot_plugin\addons\godot_ai_assistant\*\*.gd"` to ensure no parsers were broken.
+- Verify `(Get-Content -Path 'c:\Github\godot-llm\godot_plugin\addons\godot_ai_assistant\ai_dock.gd').Length` is < 1000 lines and report the final line count.
