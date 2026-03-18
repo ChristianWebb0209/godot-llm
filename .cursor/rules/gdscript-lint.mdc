@@ -1,14 +1,25 @@
 ---
-description: Lint GDScript after editing; run gdlint on any touched .gd file
+description: Lint GDScript after editing; use Cursor task (Godot --check-only)
 globs: "**/*.gd"
-alwaysApply: false
+alwaysApply: true
 ---
 
 # GDScript: Lint After Editing
 
-Whenever you create or modify any `.gd` file in this project, you **must** run the project's Godot linter and fix any reported errors.
+Whenever you create or modify any `.gd` file in this project, you **must** run the project's Godot linter and fix any reported errors **repeatedly until lint passes with no errors**. This rule is **always applied** for `.gd` edits in Cursor.
 
 ## How to lint
+
+Preferred for day-to-day development (continuous diagnostics):
+
+- Make sure Godot LSP is running (extension-driven). This repo ships a workspace task that tries to start it automatically:
+  - `GDScript: Start Godot LSP (headless)`
+
+Then, for an explicit “gate” lint check (shows errors in Cursor's **Problems** panel) that **must pass before changes are considered done**:
+
+- Run the task: `GDScript: Lint current file (Godot --check-only)`
+
+Fallback (CLI):
 
 From the repo root or from `rag_service`:
 
@@ -21,7 +32,9 @@ cd rag_service
 - Results are written to `rag_service/gdscript_errors.txt`. Address any errors before considering the task done.
 - Godot must be available (see `rag_service/scripts/gdlint.ps1` for path/PATH requirements).
 
-## Checklist
+## Checklist (per edited `.gd` file)
 
-- [ ] After editing any `.gd` file, run `gdlint.ps1` on that file (and any other modified .gd files).
-- [ ] Fix any issues reported in `gdscript_errors.txt`.
+- [ ] Run the lint task (`GDScript: Lint current file (Godot --check-only)` or `gdlint.ps1`) on this file.
+- [ ] Inspect all reported errors in `gdscript_errors.txt` and/or the Problems panel.
+- [ ] Fix the code and re-run lint.
+- [ ] Repeat until lint exits cleanly (no errors reported for this file).

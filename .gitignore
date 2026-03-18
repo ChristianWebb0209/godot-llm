@@ -40,6 +40,14 @@ merged/
 # RAG test run outputs
 rag_service/testing/results/
 
+# Fine-tuning data backups (from filter_removed_tools.py)
+fine_tuning/**/*.bak
+
 # Colab / runtime
 colab/**/*.ipynb_checkpoints/
 .DS_Store
+
+
+.agents/
+.agent/
+.cursor/
