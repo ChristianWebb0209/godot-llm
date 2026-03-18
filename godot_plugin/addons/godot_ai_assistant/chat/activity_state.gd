@@ -41,7 +41,7 @@ func push_activity(line: String) -> void:
 	stop_activity_glow()
 	update_activity_ui()
 	start_activity_glow()
-	_dock.render_chat_log()
+	_dock._chat_renderer.render_chat_log()
 
 
 func clear_activity() -> void:
@@ -56,7 +56,7 @@ func clear_activity() -> void:
 	save_current_chat_activity()
 	stop_activity_glow()
 	update_activity_ui()
-	_dock.render_chat_log()
+	_dock._chat_renderer.render_chat_log()
 
 
 func update_activity_ui() -> void:
@@ -73,7 +73,7 @@ func update_activity_ui() -> void:
 		else:
 			var n := _dock.get_activity_history().size()
 			_dock.thought_history_button.visible = n > 0
-			var suffix := " ▼" if _dock.thought_history_list.visible else " ▶"
+			var suffix := " v" if _dock.thought_history_list.visible else " >"
 			_dock.thought_history_button.text = "Thought history (%d)" % n + suffix
 	if _dock.thought_history_list:
 		for c in _dock.thought_history_list.get_children():

@@ -38,11 +38,11 @@ static func build(
 			elif ClassDB.is_parent_class(scene_root_class, "Node2D"):
 				scene_dimension = "2d"
 			else:
-				scene_dimension = "2d"  # Node, Control, etc. — treat as 2d for safety
+				scene_dimension = "2d"  # Node, Control, etc. - treat as 2d for safety
 		var scene_root_for_tree := editor_interface.get_edited_scene_root()
 		if scene_root_for_tree:
 			scene_tree_text = _build_scene_tree_text(scene_root_for_tree)
-		# Selected node type (for scene/node context) — always from selection.
+		# Selected node type (for scene/node context) - always from selection.
 		var selected_script: Script = null
 		var selection := editor_interface.get_selection() if editor_interface else null
 		if selection:

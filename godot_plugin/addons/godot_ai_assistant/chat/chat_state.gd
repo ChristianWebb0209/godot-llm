@@ -13,6 +13,10 @@ func _init(dock: GodotAIDock) -> void:
 func ensure_default_chat() -> void:
 	if _dock.chat_tab_bar == null:
 		return
+	var store := _dock.get_agent_store()
+	if store:
+		store.ensure_default_chat()
+		return
 	if _dock.get_chats().is_empty():
 		var title := "Chat 1"
 		_dock.get_chats().append({
@@ -56,6 +60,10 @@ func ensure_chat_has_messages() -> void:
 
 
 func on_new_chat_pressed() -> void:
+	var store := _dock.get_agent_store()
+	if store:
+		store.add_chat()
+		return
 	if _dock.chat_tab_bar == null:
 		return
 	var idx := _dock.get_chats().size() + 1
@@ -97,7 +105,7 @@ func on_chat_tab_selected(tab_index: int) -> void:
 	if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
 		_dock.set_streamed_markdown(messages[messages.size() - 1].get("text", ""))
 	# So Send/Stop reflects the newly selected chat (e.g. Send on new chat even if another is streaming).
-	_dock._update_ask_button_state()
+	_dock._chat_ux.update_ask_button_state()
 
 
 func on_chat_tab_rearranged(_idx_to: int) -> void:
@@ -113,3 +121,66 @@ func on_chat_tab_rearranged(_idx_to: int) -> void:
 	if new_chats.size() == _dock.get_chats().size():
 		_dock.set_chats_arr(new_chats)
 		_dock.set_current_chat_index(_dock.chat_tab_bar.current_tab)
+
+
+func on_chat_tab_close_pressed(tab_index: int) -> void:
+	if _dock.get_chats().size() <= 1:
+		return
+	delete_chat_at_index(tab_index)
+
+
+func update_chat_tab_close_visibility() -> void:
+	if not _dock.chat_tab_bar:
+		return
+	if _dock.get_chats().size() <= 1:
+		_dock.chat_tab_bar.tab_close_display_policy = TabBar.CLOSE_BUTTON_SHOW_NEVER
+	else:
+		_dock.chat_tab_bar.tab_close_display_policy = TabBar.CLOSE_BUTTON_SHOW_ALWAYS
+
+
+func delete_chat_at_index(idx: int) -> void:
+	if _dock.get_agent_store():
+		if idx < 0 or idx >= _dock.get_chats().size():
+			return
+		_dock.get_agent_store().remove_chat_at(idx)
+		if _dock.has_method("_sync_tab_bar_from_store"):
+			_dock._sync_tab_bar_from_store()
+		update_chat_tab_close_visibility()
+		_dock._chat_renderer.render_chat_log()
+		if _dock.has_method("_update_context_usage_label"):
+			_dock._chat_ux.update_context_usage_label()
+		if _dock.has_method("_update_activity_ui"):
+			_dock._activity_state.update_activity_ui()
+		if _dock.has_method("_update_tool_calls_ui"):
+			_dock._chat_renderer.update_tool_calls_ui()
+		if _dock.has_method("_update_ask_button_state"):
+			_dock._chat_ux.update_ask_button_state()
+		return
+	if idx < 0 or idx >= _dock.get_chats().size():
+		return
+	var was_current := (idx == _dock.get_current_chat())
+	_dock.get_chats().remove_at(idx)
+	if _dock.chat_tab_bar and _dock.chat_tab_bar.tab_count > idx:
+		_dock.chat_tab_bar.remove_tab(idx)
+	if _dock.get_chats().is_empty():
+		ensure_default_chat()
+		update_chat_tab_close_visibility()
+		return
+	# Adjust current index: if we removed the current tab or one before it, update.
+	if was_current:
+		_dock.set_current_chat_index(mini(idx, _dock.get_chats().size() - 1))
+	elif idx < _dock.get_current_chat():
+		_dock.set_current_chat_index(_dock.get_current_chat() - 1)
+	if _dock.chat_tab_bar:
+		_dock.chat_tab_bar.current_tab = _dock.get_current_chat()
+	update_chat_tab_close_visibility()
+	on_chat_tab_selected(_dock.get_current_chat())
+	_dock._chat_renderer.render_chat_log()
+	if _dock.has_method("_update_context_usage_label"):
+		_dock._chat_ux.update_context_usage_label()
+	if _dock.has_method("_update_activity_ui"):
+		_dock._activity_state.update_activity_ui()
+	if _dock.has_method("_update_tool_calls_ui"):
+		_dock._chat_renderer.update_tool_calls_ui()
+	if _dock.has_method("_update_ask_button_state"):
+		_dock._chat_ux.update_ask_button_state()
