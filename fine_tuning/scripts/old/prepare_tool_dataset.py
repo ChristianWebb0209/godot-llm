@@ -22,14 +22,14 @@ import random
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 DATA_DIR = REPO_ROOT / "fine_tuning" / "data"
 TOOL_USAGE_DIR = DATA_DIR / "tool_usage"
 SYNTHETIC_DIR = DATA_DIR / "synthetic"
 SEEDS_DIR = DATA_DIR / "seeds"
 RAW_DIR = DATA_DIR / "raw"
 TOOLS_USAGE_DIR = REPO_ROOT / "godot_knowledge_base" / "tools_usage"
-DEFAULT_INPUT = SYNTHETIC_DIR / "generated.jsonl"
+DEFAULT_INPUT = SYNTHETIC_DIR / "v2_generated.jsonl"
 TRAIN_OUT = TOOL_USAGE_DIR / "train.jsonl"
 VAL_OUT = TOOL_USAGE_DIR / "val.jsonl"
 

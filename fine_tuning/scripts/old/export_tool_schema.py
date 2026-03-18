@@ -8,7 +8,7 @@ from pathlib import Path
 import json
 import sys
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMAS_DIR = REPO_ROOT / "fine_tuning" / "schemas"
 OUTPUT_FILE = SCHEMAS_DIR / "tools.json"
 
