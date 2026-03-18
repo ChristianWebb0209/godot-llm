@@ -430,7 +430,7 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         train_dataset=dataset["train"],
         eval_dataset=dataset["val"],
         dataset_text_field="text",
-        max_seq_length=768,
+        max_seq_length=512,
         args=training_args,
     )
     return trainer
