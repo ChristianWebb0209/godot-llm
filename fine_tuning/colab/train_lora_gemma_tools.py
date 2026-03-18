@@ -401,23 +401,22 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
     (uses latest checkpoint in output_dir, e.g. ./godot-tools-lora/checkpoint-200).
     """
     output_dir = os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")
-    save_steps = 50
+    save_steps = 700
     save_total_limit = 3
 
     training_args = TrainingArguments(
         output_dir=os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora"),
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=3,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=2,
         num_train_epochs=1,
         learning_rate=2e-4,
         lr_scheduler_type="cosine",
         warmup_ratio=0.03,
-        logging_steps=10,
-        eval_strategy="steps",
-        eval_steps=100,
+        logging_steps=40,
+        eval_strategy="no",
         save_strategy="steps",
-        save_steps=int(os.environ.get("CHECKPOINT_STEPS", 50)),
+        save_steps=700,
         save_total_limit=save_total_limit,
         bf16=False,
         fp16=True,
@@ -433,7 +432,6 @@ def build_trainer(tokenizer, model, dataset: DatasetDict) -> SFTTrainer:
         dataset_text_field="text",
         max_seq_length=768,
         args=training_args,
-        packing=True,
     )
     return trainer
 

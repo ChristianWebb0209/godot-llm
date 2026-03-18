@@ -278,12 +278,6 @@ trainer = build_trainer(tokenizer, model, dataset)
 
 
 # ## 6. Train and save adapters
-#
-# This may take a while depending on GPU. To resume after an interrupt (e.g. if
-# you already have ./godot-tools-lora/checkpoint-200): use
-#   trainer.train(resume_from_checkpoint=True)
-# Otherwise use trainer.train() for a fresh run.
-
 
 CHECKPOINT_DIR = Path(os.environ.get("CHECKPOINT_DIR", "./godot-tools-lora")).resolve()
 latest_checkpoint = None
