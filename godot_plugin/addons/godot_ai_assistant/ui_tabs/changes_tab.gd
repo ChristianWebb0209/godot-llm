@@ -3,8 +3,37 @@ extends RefCounted
 class_name GodotAIChangesTab
 
 ## Pending & Timeline tab: render lists, show diff, revert selected.
+## Each timeline entry shows summary, time (e.g. "2m ago"), and lines added/removed (+N -M).
 
 var _dock: GodotAIDock
+
+static func _time_ago_string(unix_ts: int) -> String:
+	if unix_ts <= 0:
+		return ""
+	var now := int(Time.get_unix_time_from_system())
+	var diff := now - unix_ts
+	if diff < 0:
+		return ""
+	if diff < 60:
+		return "just now"
+	if diff < 3600:
+		var m := diff / 60
+		return "%d min ago" % m if m == 1 else "%d mins ago" % m
+	if diff < 86400:
+		var h := diff / 3600
+		return "1 hr ago" if h == 1 else "%d hrs ago" % h
+	if diff < 604800:
+		var d := diff / 86400
+		return "1 day ago" if d == 1 else "%d days ago" % d
+	var w := diff / 604800
+	return "1 wk ago" if w == 1 else "%d wks ago" % w
+
+static func _lines_added_removed(old_content: String, new_content: String) -> Vector2i:
+	var old_lines := old_content.split("\n", false).size()
+	var new_lines := new_content.split("\n", false).size()
+	var added := new_lines - old_lines if new_lines > old_lines else 0
+	var removed := old_lines - new_lines if old_lines > new_lines else 0
+	return Vector2i(added, removed)
 
 func _init(dock: GodotAIDock) -> void:
 	_dock = dock
@@ -13,18 +42,24 @@ func _init(dock: GodotAIDock) -> void:
 func render_changes_tab() -> void:
 	if _dock.get_edit_store() == null:
 		return
-	if _dock.pending_list:
-		_dock.pending_list.clear()
+	if _dock.timeline_list:
+		_dock.timeline_list.visible = true
+	if _dock.history_scroll:
+		_dock.history_scroll.visible = false
+	var pl: ItemList = _dock.pending_list
+	var tl: ItemList = _dock.timeline_list
+	if pl:
+		pl.clear()
 		_dock.set_selected_pending_id_val("")
 		for p in _dock.get_edit_store().pending:
 			if typeof(p) != TYPE_DICTIONARY:
 				continue
 			var action_type := str(p.get("action_type", ""))
 			var icon := GodotAIEditStore.get_action_icon(action_type)
-			var label := "%s %s" % [icon, str(p.get("summary", ""))]
-			_dock.pending_list.add_item(label)
-	if _dock.timeline_list:
-		_dock.timeline_list.clear()
+			var label := (icon + " " if icon else "") + str(p.get("summary", ""))
+			pl.add_item(label)
+	if tl:
+		tl.clear()
 		_dock.set_selected_timeline_id_val("")
 		for e in _dock.get_edit_store().events:
 			if typeof(e) != TYPE_DICTIONARY:
@@ -32,27 +67,18 @@ func render_changes_tab() -> void:
 			var action_type := str(e.get("action_type", ""))
 			var icon := GodotAIEditStore.get_action_icon(action_type)
 			var summary := str(e.get("summary", ""))
-			var label := "%s %s" % [icon, summary]
-			_dock.timeline_list.add_item(label)
-	show_diff("", "")
-
-
-func show_diff(old_content: String, new_content: String) -> void:
-	var diff_path := "TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox/DiffSplit"
-	var old_te: TextEdit = _dock.diff_old_text if _dock.diff_old_text else _dock.get_node_or_null(
-		diff_path + "/OldText"
-	) as TextEdit
-	var new_te: TextEdit = _dock.diff_new_text if _dock.diff_new_text else _dock.get_node_or_null(
-		diff_path + "/NewText"
-	) as TextEdit
-	if old_te:
-		old_te.text = old_content
-		old_te.scroll_vertical = 0
-		old_te.queue_redraw()
-	if new_te:
-		new_te.text = new_content
-		new_te.scroll_vertical = 0
-		new_te.queue_redraw()
+			var created_unix := int(e.get("created_unix", 0))
+			var old_c := str(e.get("old_content", ""))
+			var new_c := str(e.get("new_content", ""))
+			var lr := _lines_added_removed(old_c, new_c)
+			var time_ago := _time_ago_string(created_unix)
+			var extra := ""
+			if lr.x > 0 or lr.y > 0:
+				extra += "  +%d -%d" % [lr.x, lr.y]
+			if not time_ago.is_empty():
+				extra += "  " + time_ago
+			var label := (icon + " " if icon else "") + summary + extra
+			tl.add_item(label)
 
 
 func on_pending_item_selected(index: int) -> void:
@@ -64,22 +90,16 @@ func on_pending_item_selected(index: int) -> void:
 	if typeof(p) != TYPE_DICTIONARY:
 		return
 	_dock.set_selected_pending_id_val(str(p.get("id", "")))
-	show_diff(str(p.get("old_content", "")), str(p.get("new_content", "")))
+	var fp := str(p.get("file_path", ""))
+	if not fp.is_empty():
+		var diff_review = _dock.get_diff_review() if _dock.has_method("get_diff_review") else null
+		if diff_review:
+			diff_review.open_and_show_diff(fp, str(p.get("old_content", "")), str(p.get("new_content", "")))
 
 
 func on_timeline_item_selected(index: int) -> void:
-	if _dock.get_edit_store() == null:
-		return
-	if index < 0 or index >= _dock.get_edit_store().events.size():
-		return
-	var e = _dock.get_edit_store().events[index]
-	if typeof(e) != TYPE_DICTIONARY:
-		return
-	_dock.set_selected_timeline_id_val(str(e.get("id", "")))
-	if str(e.get("kind", "")) == "file":
-		show_diff(str(e.get("old_content", "")), str(e.get("new_content", "")))
-	else:
-		show_diff("", "")
+	# Side tab: no View buttons; focus automatically on selection.
+	focus_on_timeline_edit(index)
 
 
 func on_revert_selected_pressed() -> void:
@@ -107,4 +127,41 @@ func on_revert_selected_pressed() -> void:
 	else:
 		_dock.set_status("Revert failed: %s" % result.get("message", "unknown"))
 	render_changes_tab()
-	_dock.apply_editor_decorations()
+	_dock._decorator.apply_decorations()
+
+
+func unfocus_timeline_edit() -> void:
+	_dock.set_selected_timeline_id_val("")
+	if _dock.timeline_list:
+		_dock.timeline_list.deselect_all()
+	var diff_review = _dock.get_diff_review() if _dock.has_method("get_diff_review") else null
+	if diff_review:
+		diff_review.clear_highlights()
+
+
+func focus_on_timeline_edit(index: int) -> void:
+	if _dock.get_edit_store() == null:
+		return
+	if index < 0 or index >= _dock.get_edit_store().events.size():
+		return
+	var e = _dock.get_edit_store().events[index]
+	if typeof(e) != TYPE_DICTIONARY:
+		return
+	_dock.set_selected_timeline_id_val(str(e.get("id", "")))
+	# Switch to Changes tab so the user sees the correct tab.
+	var changes_tab_idx := -1
+	if _dock.tab_container:
+		for i in range(_dock.tab_container.get_child_count()):
+			if _dock.tab_container.get_child(i).name == "Changes":
+				changes_tab_idx = i
+				break
+	if changes_tab_idx >= 0 and _dock.tab_container.current_tab != changes_tab_idx:
+		_dock.tab_container.current_tab = changes_tab_idx
+	if str(e.get("kind", "")) == "file":
+		var fp := str(e.get("file_path", ""))
+		if not fp.is_empty():
+			if _dock.has_method("get_editor_interface"):
+				GodotAIFollowEditor.focus_editor_on_file(_dock.get_editor_interface(), fp)
+			var diff_review = _dock.get_diff_review() if _dock.has_method("get_diff_review") else null
+			if diff_review:
+				diff_review.open_and_show_diff(fp, str(e.get("old_content", "")), str(e.get("new_content", "")))

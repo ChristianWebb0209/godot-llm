@@ -2,6 +2,8 @@ extends Resource
 
 class_name GodotAIMarkdownRenderer
 
+## Markdown → BBCode renderer for displaying assistant messages in RichTextLabel.
+
 const _LOG_PREFIX := "[AI Assistant] "
 
 
@@ -54,7 +56,7 @@ func markdown_to_bbcode(md: String) -> String:
 
 		# Lists
 		if line.begins_with("- "):
-			out_lines.append("• " + line.substr(2))
+			out_lines.append("- " + line.substr(2))
 			continue
 
 		# Inline code: `code`

@@ -2,7 +2,15 @@
 extends RefCounted
 class_name GodotAIToolRunner
 
-## Runs editor tool_calls from the backend: execute loop, format summaries, format chat section.
+## Controller/Orchestrator: execute backend tool_calls on the editor.
+##
+## Responsibilities:
+## - Map backend tool_calls → `GodotAIEditorToolExecutor` payloads
+## - Execute tool calls (bounded) and collect edit records
+##
+## Non-goals:
+## - UI rendering/layout
+## - Owning state (stores handle state; dock delegates rendering)
 
 const _MAX_TOOL_CALLS_PER_RESPONSE := 20
 
@@ -119,7 +127,7 @@ func format_editor_actions_chat_section(display_changes: Array) -> String:
 		var summary := str(c.get("summary", c.get("message", "")))
 		var icon := GodotAIEditStore.get_action_icon(action_type)
 		var label := GodotAIEditStore.get_action_label(action_type)
-		lines.append("- " + icon + " **" + label + "**: " + summary)
+		lines.append("- " + (icon + " " if icon else "") + "**" + label + "**: " + summary)
 		if action_type == "lint_file" and c.has("message"):
 			lines.append(str(c.get("message", "")))
 	lines.append("")
@@ -138,9 +146,9 @@ func run_editor_actions_async(
 	var display_changes: Array = []
 	var exec = _dock.get_tool_executor()
 	if exec:
-		exec.set_follow_agent(
-			_dock.follow_agent_check.button_pressed if _dock.follow_agent_check else false
-		)
+		var settings: GodotAISettings = _dock.get_settings()
+		var follow := settings.follow_agent if settings else ( _dock.follow_agent_check.button_pressed if _dock.follow_agent_check else false )
+		exec.set_follow_agent(follow)
 	var edit_records: Array = []
 	var effective_trigger := trigger if not trigger.is_empty() else _dock.get_last_tool_trigger()
 	var effective_prompt := prompt if not prompt.is_empty() else _dock.get_last_tool_prompt()
@@ -156,7 +164,7 @@ func run_editor_actions_async(
 		tool_calls = tool_calls.slice(0, _MAX_TOOL_CALLS_PER_RESPONSE)
 
 	if tool_calls.size() > 0:
-		_dock.push_activity("Running tools (%d)…" % tool_calls.size())
+		_dock._activity_state.push_activity("Running tools (%d)..." % tool_calls.size())
 	for tc in tool_calls:
 		if typeof(tc) != TYPE_DICTIONARY:
 			continue
@@ -166,7 +174,7 @@ func run_editor_actions_async(
 		var action: String = str(out.get("action", ""))
 		if action.is_empty():
 			continue
-		_dock.push_activity("Tool call: %s" % action)
+		_dock._activity_state.push_activity("Tool call: %s" % action)
 
 		if action in ["create_file", "write_file", "append_to_file", "apply_patch", "create_script", "delete_file"]:
 			# Only write_file requires non-empty content; create_file may be create-only (then write_file separately).
@@ -268,7 +276,7 @@ func run_editor_actions_async(
 		var res_ok := result.get("success", false)
 		var node_msg := result.get("message", "OK") if res_ok else ("Error: %s" % result.get("message", "unknown"))
 		results.append(node_msg)
-		# So the model sees run output in chat context (write → run → observe → fix)
+		# So the model sees run output in chat context (write -> run -> observe -> fix)
 		if action in ["run_terminal_command", "run_godot_headless", "run_scene"]:
 			var run_summary := "Ran: %s" % action
 			if action == "run_scene" or action == "run_godot_headless":
@@ -320,7 +328,7 @@ func run_editor_actions_async(
 		var messages: Array = _dock.get_chats()[_dock.get_current_chat()]["messages"]
 		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
 			messages[messages.size() - 1]["text"] += "\n\n_Skipped %d tool call(s). Ask for fewer changes._" % skipped
-		_dock.render_chat_log()
+		_dock._chat_renderer.render_chat_log()
 	if display_changes.size() > 0:
 		_dock.set_status("Editor actions: %d change(s)" % display_changes.size())
 		var section: String = format_editor_actions_chat_section(display_changes)
@@ -328,14 +336,14 @@ func run_editor_actions_async(
 		var messages: Array = _dock.get_chats()[_dock.get_current_chat()]["messages"]
 		if messages.size() > 0 and messages[messages.size() - 1].get("role", "") == "assistant":
 			messages[messages.size() - 1]["text"] += section
-		_dock.render_chat_log()
+		_dock._chat_renderer.render_chat_log()
 	else:
 		_dock.set_status("Response received.")
 	# If any edited file still has lint errors, send a follow-up so the model fixes remaining errors (repeats until clean or cap).
 	if not first_failed_lint_path.is_empty():
 		_dock.call_deferred("send_lint_fix_follow_up", first_failed_lint_path, first_failed_lint_output)
 	# Clear "Thinking..." / "Using tool: X" so when nothing is happening the activity shows nothing.
-	_dock.clear_activity()
+	_dock._activity_state.clear_activity()
 
-	_dock.call_deferred("_render_changes_tab")
-	_dock.call_deferred("apply_editor_decorations")
+	_dock._changes_tab.call_deferred("render_changes_tab")
+	_dock._decorator.call_deferred("apply_decorations")

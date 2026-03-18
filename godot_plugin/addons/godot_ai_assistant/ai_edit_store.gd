@@ -13,16 +13,16 @@ class_name GodotAIEditStore
 const STORE_PATH := "user://godot_ai_assistant_edits.json"
 
 ## --- Marker constants (used by editor_decorator to label script tabs, FileSystem, Scene tree) ---
-const FILE_MARKER_CREATED := "🟢 "   ## New file / just created
-const FILE_MARKER_MODIFIED := "🟡 "  ## Modified
-const FILE_MARKER_DELETED := "⚫ "   ## Deleted
-const FILE_MARKER_FAILED := "🔴 "    ## Lint/edit failed
-const NODE_MARKER_CREATED := "🧩 "   ## Component/node just created
-const NODE_MARKER_MODIFIED := "🟡 "  ## Node property changed
+const FILE_MARKER_CREATED := "[+] "   ## New file / just created
+const FILE_MARKER_MODIFIED := "[~] "  ## Modified
+const FILE_MARKER_DELETED := "[-] "   ## Deleted
+const FILE_MARKER_FAILED := "[!] "    ## Lint/edit failed
+const NODE_MARKER_CREATED := "[+] "   ## Component/node just created
+const NODE_MARKER_MODIFIED := "[~] "  ## Node property changed
 
 ## All markers (for stripping when re-applying decorations)
-const _FILE_MARKERS: Array = ["🟢 ", "🟡 ", "⚫ ", "🔴 "]
-const _NODE_MARKERS: Array = ["🧩 ", "🟡 "]
+const _FILE_MARKERS: Array = ["[+] ", "[~] ", "[-] ", "[!] "]
+const _NODE_MARKERS: Array = ["[+] ", "[~] "]
 
 ## --- Editor action type constants (unified for chat, timeline, and history) ---
 const ACTION_CREATE_FILE := "create_file"
@@ -40,24 +40,24 @@ const ACTION_RUN_GODOT_HEADLESS := "run_godot_headless"
 
 ## action_type -> { icon: String, label: String }
 const _ACTION_DISPLAY: Dictionary = {
-	ACTION_CREATE_FILE: {"icon": "📄", "label": "Add file"},
-	ACTION_WRITE_FILE: {"icon": "✏️", "label": "Write file"},
-	ACTION_APPEND_TO_FILE: {"icon": "➕", "label": "Append"},
-	ACTION_APPLY_PATCH: {"icon": "🔧", "label": "Patch"},
-	ACTION_CREATE_SCRIPT: {"icon": "📜", "label": "Create script"},
-	ACTION_DELETE_FILE: {"icon": "🗑️", "label": "Delete file"},
-	ACTION_CREATE_NODE: {"icon": "🧩", "label": "Create component"},
-	ACTION_SET_NODE_PROPERTY: {"icon": "⚙️", "label": "Set property"},
-	ACTION_SET_IMPORT_OPTION: {"icon": "⚙️", "label": "Set import option"},
-	ACTION_RUN_SCENE: {"icon": "▶️", "label": "Run scene"},
-	ACTION_RUN_TERMINAL_COMMAND: {"icon": "⌨️", "label": "Run command"},
-	ACTION_RUN_GODOT_HEADLESS: {"icon": "▶️", "label": "Run Godot headless"},
+	ACTION_CREATE_FILE: {"icon": "", "label": "Add file"},
+	ACTION_WRITE_FILE: {"icon": "", "label": "Write file"},
+	ACTION_APPEND_TO_FILE: {"icon": "", "label": "Append"},
+	ACTION_APPLY_PATCH: {"icon": "", "label": "Patch"},
+	ACTION_CREATE_SCRIPT: {"icon": "", "label": "Create script"},
+	ACTION_DELETE_FILE: {"icon": "", "label": "Delete file"},
+	ACTION_CREATE_NODE: {"icon": "", "label": "Create component"},
+	ACTION_SET_NODE_PROPERTY: {"icon": "", "label": "Set property"},
+	ACTION_SET_IMPORT_OPTION: {"icon": "", "label": "Set import option"},
+	ACTION_RUN_SCENE: {"icon": "", "label": "Run scene"},
+	ACTION_RUN_TERMINAL_COMMAND: {"icon": "", "label": "Run command"},
+	ACTION_RUN_GODOT_HEADLESS: {"icon": "", "label": "Run Godot headless"},
 }
 
 
 static func get_action_icon(action_type: String) -> String:
 	var d = GodotAIEditStore._ACTION_DISPLAY.get(action_type, {})
-	return d.get("icon", "📌") if d is Dictionary else "📌"
+	return d.get("icon", "") if d is Dictionary else ""
 
 
 static func get_action_label(action_type: String) -> String:
@@ -102,7 +102,6 @@ func load_from_disk() -> void:
 	node_status = d.get("node_status", {}) if d.get("node_status", {}) is Dictionary else {}
 	events = d.get("events", []) if d.get("events", []) is Array else []
 	pending = d.get("pending", []) if d.get("pending", []) is Array else []
-
 
 func save_to_disk() -> void:
 	var d := {

@@ -69,7 +69,7 @@ static func run_lint(dock: GodotAIDock, res_path: String) -> Dictionary:
 	if not res.is_empty():
 		dock.set_last_lint_result(res_path, res.get("output", ""))
 		return res
-	var d := await dock.request_backend_lint(res_path)
+	var d: Dictionary = await dock.request_backend_lint(res_path)
 	return {
 		"ok": d.get("success", false),
 		"exit_code": d.get("exit_code", -1),

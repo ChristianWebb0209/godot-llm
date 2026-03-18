@@ -15,9 +15,15 @@ func _get_dock() -> GodotAIDock:
 
 
 func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
-	if data == null or not data is Dictionary:
+	if data == null:
+		return false
+	if data is String:
+		return (data as String).strip_edges().length() > 0
+	if not data is Dictionary:
 		return false
 	var d: Dictionary = data
+	if str(d.get("selection_text", d.get("text", ""))).strip_edges().length() > 0:
+		return true
 	if d.has("files"):
 		var files: Variant = d["files"]
 		if files is PackedStringArray and (files as PackedStringArray).size() > 0:
@@ -36,6 +42,6 @@ func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
 
 
 func _drop_data(_at_position: Vector2, data: Variant) -> void:
-	var dock := _get_dock()
+	var dock: GodotAIDock = _get_dock()
 	if dock != null:
 		dock.add_pinned_context_from_drag_data(data)

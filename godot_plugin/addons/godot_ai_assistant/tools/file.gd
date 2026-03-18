@@ -17,6 +17,25 @@ static func read_text_file_abs(abs_path: String) -> String:
 	return t
 
 
+static func _godot_ai_follow_after_file(executor: GodotAIEditorToolExecutor, path: String) -> void:
+	var ei: EditorInterface = executor.editor_interface
+	if ei == null:
+		return
+	var p := path.replace("\\", "/").strip_edges()
+	if not p.begins_with("res://"):
+		p = "res://" + p
+	var ext := p.get_extension().to_lower()
+	if ext == "gd" or ext == "cs":
+		GodotAIFollowEditor.open_script_and_switch(ei, p)
+	elif ext == "tscn":
+		ei.open_scene_from_path(p)
+		GodotAIFollowEditor.deferred_switch_main_screen_for_scene(ei)
+	else:
+		var res: Resource = load(p) as Resource
+		if res:
+			ei.edit_resource(res)
+
+
 static func execute_create_file(executor: GodotAIEditorToolExecutor, output: Dictionary) -> Dictionary:
 	var path: String = output.get("path", "")
 	var content: String = output.get("content", "")
@@ -38,9 +57,7 @@ static func execute_create_file(executor: GodotAIEditorToolExecutor, output: Dic
 	f.store_string(content)
 	f.close()
 	if executor.editor_interface and executor.follow_agent:
-		var res := load(path)
-		if res:
-			executor.editor_interface.edit_resource(res)
+		_godot_ai_follow_after_file(executor, path)
 	var norm_path := executor.normalize_res_path(path)
 	return {
 		"success": true,
@@ -76,9 +93,7 @@ static func execute_write_file(executor: GodotAIEditorToolExecutor, output: Dict
 	f.store_string(content)
 	f.close()
 	if executor.editor_interface and executor.follow_agent:
-		var res := load(path)
-		if res:
-			executor.editor_interface.edit_resource(res)
+		_godot_ai_follow_after_file(executor, path)
 	var norm_path := executor.normalize_res_path(path)
 	return {
 		"success": true,
@@ -115,9 +130,7 @@ static func execute_append_to_file(executor: GodotAIEditorToolExecutor, output: 
 	f.store_string(new_content)
 	f.close()
 	if executor.editor_interface and executor.follow_agent:
-		var res := load(path)
-		if res:
-			executor.editor_interface.edit_resource(res)
+		_godot_ai_follow_after_file(executor, path)
 	var norm_path := executor.normalize_res_path(path)
 	return {
 		"success": true,
@@ -231,9 +244,7 @@ static func execute_apply_patch(executor: GodotAIEditorToolExecutor, output: Dic
 	f.store_string(new_content)
 	f.close()
 	if executor.editor_interface and executor.follow_agent:
-		var res := load(path)
-		if res:
-			executor.editor_interface.edit_resource(res)
+		_godot_ai_follow_after_file(executor, path)
 	var norm_path := executor.normalize_res_path(path)
 	return {
 		"success": true,

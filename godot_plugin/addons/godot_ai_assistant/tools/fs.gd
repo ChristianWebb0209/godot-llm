@@ -4,6 +4,15 @@ class_name GodotAIFS
 
 ## Filesystem operations: list_directory, list_files, search_files, grep_search.
 
+## Escapes special regex characters so a string can be used as a literal pattern (Godot 4 has no RegEx.escape).
+static func _escape_regex(s: String) -> String:
+	var out: String = ""
+	for c in s:
+		if c in "\\.*+?[](){}^$|":
+			out += "\\"
+		out += c
+	return out
+
 static func execute_list_directory(executor: GodotAIEditorToolExecutor, output: Dictionary) -> Dictionary:
 	var path: String = output.get("path", "res://")
 	var recursive: bool = output.get("recursive", false)
@@ -214,7 +223,7 @@ static func execute_grep_search(executor: GodotAIEditorToolExecutor, output: Dic
 		var err := re.compile(pattern)
 		if err != OK:
 			re = RegEx.new()
-			re.compile(RegEx.escape(pattern))
+			re.compile(_escape_regex(pattern))
 	var matches: Array = []
 	var root_abs := executor.project_path_to_absolute(root_path)
 	var stack: Array = [{"abs": root_abs, "res": root_path, "depth": 0}]

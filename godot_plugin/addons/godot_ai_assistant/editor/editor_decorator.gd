@@ -2,7 +2,7 @@
 extends RefCounted
 class_name GodotAIEditorDecorator
 
-## Applies AI edit indicators (🟢🟡⚫🔴/🧩) to the editor UI only: script tabs,
+## Applies AI edit indicators ([+][~][-][!]) to the editor UI only: script tabs,
 ## FileSystem tree, Scene tree. Reads status and markers from GodotAIEditStore;
 ## does not persist or mutate edit state. All edit data lives in ai_edit_store.gd.
 
@@ -11,6 +11,10 @@ var _edit_store: GodotAIEditStore = null
 
 ## When true, apply_decorations() prints a short diagnostic.
 var debug_diagnostic: bool = false
+
+## When true, force the first item in script tabs, FileSystem tree, and Scene tree to show [+]
+## so you can verify the decorator is finding and updating those controls.
+const DEBUG_FORCE_FIRST_GREEN := true
 
 
 func _init(p_editor_interface: EditorInterface = null, p_edit_store: GodotAIEditStore = null) -> void:
@@ -63,26 +67,23 @@ func _print_diagnostic() -> void:
 	])
 
 
-## Godot 4.x: ScriptEditor may use TabContainer; get TabBar by name first, then by type.
+## Godot 4.x: ScriptEditor may use TabContainer; get TabBar that shows script tabs (match open_scripts count).
 func _find_script_editor_tab_bar(script_editor: Object) -> TabBar:
 	if script_editor == null:
 		return null
 	var node := script_editor as Node
 	if node == null:
 		return null
-	# By name (engine can rename internally)
-	var tab_container: TabContainer = node.find_child("TabContainer", true, false)
-	if tab_container is TabContainer and tab_container.get_tab_bar():
-		return tab_container.get_tab_bar()
-	var tab_bar: TabBar = node.find_child("TabBar", true, false)
-	if tab_bar is TabBar:
-		return tab_bar
-	tab_bar = node.find_child("ScriptEditorTabBar", true, false)
-	if tab_bar is TabBar:
-		return tab_bar
-	# By type: first TabContainer with a tab bar, or first TabBar with tabs (script list)
+	var open_count: int = script_editor.get_open_scripts().size() if script_editor.has_method("get_open_scripts") else 0
 	var candidates: Array = []
 	_collect_tab_bars(node, candidates)
+	# Prefer the TabBar whose tab count matches open scripts (the script list tabs)
+	for tb in candidates:
+		if tb is TabBar:
+			var bar: TabBar = tb as TabBar
+			if bar.tab_count > 0 and (open_count <= 0 or bar.tab_count == open_count):
+				return bar
+	# Fallback: first TabBar with any tabs
 	for tb in candidates:
 		if tb is TabBar and (tb as TabBar).tab_count > 0:
 			return tb as TabBar
@@ -123,6 +124,9 @@ func _decorate_script_tabs() -> void:
 							marker = _edit_store.get_file_marker(str(fp))
 							break
 		tab_bar.set_tab_title(i, marker + raw)
+	if DEBUG_FORCE_FIRST_GREEN and tab_bar.tab_count > 0:
+		var raw_first := GodotAIEditStore.strip_markers(tab_bar.get_tab_title(0))
+		tab_bar.set_tab_title(0, GodotAIEditStore.FILE_MARKER_CREATED + raw_first)
 
 
 ## Find first Tree under dock; fallback: search by type.
@@ -139,13 +143,22 @@ func _find_tree_under(n: Node) -> Tree:
 func _find_filesystem_tree(fsdock: Object) -> Tree:
 	if fsdock == null:
 		return null
+	# Engine exposes get_tree_control() on FileSystemDock in some versions
+	if fsdock.has_method("get_tree_control"):
+		var t = fsdock.get_tree_control()
+		if t is Tree:
+			return t as Tree
 	var node := fsdock as Node
 	if node == null:
 		return null
-	# Prefer named Tree, then any Tree under the dock (Godot 4 layout may nest it)
+	# Engine uses FileSystemTree (class name); node name may be "Tree" or "FileSystemTree"
 	var tree_node = node.find_child("Tree", true, false)
 	if tree_node is Tree:
 		return tree_node as Tree
+	tree_node = node.find_child("FileSystemTree", true, false)
+	if tree_node is Tree:
+		return tree_node as Tree
+	# Fallback: first Tree descendant (by type)
 	return _find_tree_under(node)
 
 
@@ -158,6 +171,10 @@ func _decorate_filesystem_tree() -> void:
 	if root == null:
 		return
 	_decorate_tree_items_files(root)
+	if DEBUG_FORCE_FIRST_GREEN:
+		var first := root.get_first_child() if root.get_first_child() else root
+		var raw := GodotAIEditStore.strip_markers(first.get_text(0))
+		first.set_text(0, GodotAIEditStore.FILE_MARKER_CREATED + raw)
 
 
 func _get_item_path_from_metadata(md: Variant) -> String:
@@ -196,38 +213,43 @@ func _decorate_tree_items_files(item: TreeItem) -> void:
 		item = item.get_next()
 
 
+## SceneTreeDock contains SceneTreeEditor (a Control), which contains the actual Tree. Get that Tree.
 func _find_scene_tree(base: Control) -> Tree:
 	if base == null:
 		return null
-	var scenedock := base.find_child("SceneTreeDock", true, false)
+	var scenedock: Node = base.find_child("SceneTreeDock", true, false) as Node
 	if scenedock == null:
-		scenedock = base.find_child("Scene", true, false)
+		scenedock = base.find_child("Scene", true, false) as Node
 	if scenedock != null:
-		var tree_node = (scenedock as Node).find_child("SceneTreeEditor", true, false)
-		if tree_node == null:
-			tree_node = (scenedock as Node).find_child("Tree", true, false)
-		if tree_node is Tree:
-			return tree_node as Tree
-		if tree_node is Node:
-			var t := (tree_node as Node).find_child("Tree", true, false)
-			if t is Tree:
-				return t as Tree
+		var editor = scenedock.find_child("SceneTreeEditor", true, false)
+		if editor != null:
+			var tree := _tree_from_scene_tree_editor(editor)
+			if tree != null:
+				return tree
+		# Fallback: any Tree under dock
+		var t := _find_tree_under(scenedock)
+		if t != null:
+			return t
 	var main_screen := _editor_interface.get_editor_main_screen()
 	if main_screen is Node:
-		var tree_node = (main_screen as Node).find_child("SceneTreeEditor", true, false)
-		if tree_node == null:
-			tree_node = (main_screen as Node).find_child("Tree", true, false)
-		if tree_node is Tree:
-			return tree_node as Tree
-		if tree_node is Node:
-			var t := (tree_node as Node).find_child("Tree", true, false)
-			if t is Tree:
-				return t as Tree
-		# Fallback: first Tree under main screen (scene tree is usually the only one there)
+		var editor = (main_screen as Node).find_child("SceneTreeEditor", true, false)
+		if editor != null:
+			var tree := _tree_from_scene_tree_editor(editor)
+			if tree != null:
+				return tree
 		var first_tree := _find_tree_under(main_screen as Node)
 		if first_tree != null:
 			return first_tree
 	return null
+
+
+func _tree_from_scene_tree_editor(editor: Node) -> Tree:
+	# SceneTreeEditor is a Control that contains a Tree; engine has get_scene_tree()
+	if editor.has_method("get_scene_tree"):
+		var t = editor.get_scene_tree()
+		if t is Tree:
+			return t as Tree
+	return editor.find_child("Tree", true, false) as Tree
 
 
 func _decorate_scene_tree(base: Control) -> void:
@@ -242,6 +264,9 @@ func _decorate_scene_tree(base: Control) -> void:
 	if root == null:
 		return
 	_decorate_tree_items_nodes(root, scene_path, "")
+	if DEBUG_FORCE_FIRST_GREEN:
+		var raw := GodotAIEditStore.strip_markers(root.get_text(0))
+		root.set_text(0, GodotAIEditStore.NODE_MARKER_CREATED + raw)
 
 
 func _decorate_tree_items_nodes(item: TreeItem, scene_path: String, parent_path: String) -> void:

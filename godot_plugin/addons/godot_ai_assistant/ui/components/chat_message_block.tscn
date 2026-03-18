@@ -1,0 +1,46 @@
+[gd_scene load_steps=2 format=3 uid="uid://ai_chat_message_block"]
+
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/ui/components/chat_message_block.gd" id="1"]
+
+[node name="ChatMessageBlock" type="VBoxContainer"]
+script = ExtResource("1")
+size_flags_horizontal = 3
+theme_override_constants/separation = 4
+
+[node name="RoleLabel" type="Label" parent="."]
+layout_mode = 2
+text = "Role"
+size_flags_horizontal = 3
+
+[node name="ReasoningPanel" type="PanelContainer" parent="."]
+layout_mode = 2
+size_flags_horizontal = 3
+visible = false
+
+[node name="ReasoningScroll" type="ScrollContainer" parent="ReasoningPanel"]
+layout_mode = 2
+custom_maximum_size = Vector2(0, 160)
+size_flags_horizontal = 3
+horizontal_scroll_mode = 2
+
+[node name="ReasoningText" type="RichTextLabel" parent="ReasoningPanel/ReasoningScroll"]
+layout_mode = 2
+bbcode_enabled = true
+fit_content = true
+autowrap_mode = 3
+selection_enabled = true
+context_menu_enabled = true
+size_flags_horizontal = 3
+
+[node name="MessageText" type="RichTextLabel" parent="."]
+layout_mode = 2
+bbcode_enabled = true
+fit_content = true
+autowrap_mode = 3
+selection_enabled = true
+context_menu_enabled = true
+size_flags_horizontal = 3
+
+[node name="Divider" type="HSeparator" parent="."]
+layout_mode = 2
+

@@ -3,7 +3,7 @@ extends RefCounted
 class_name GodotAIRun
 
 ## Run terminal commands and Godot headlessly; capture exit code, stdout, and stderr
-## so the model can "observe" output and fix (write → run → observe → fix loop).
+## so the model can "observe" output and fix (write -> run -> observe -> fix loop).
 
 static func _get_shell_and_args(full_command: String) -> PackedStringArray:
 	if OS.get_name() == "Windows":

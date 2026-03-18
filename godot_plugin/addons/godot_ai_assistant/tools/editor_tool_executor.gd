@@ -5,7 +5,7 @@ class_name GodotAIEditorToolExecutor
 ## Dispatches editor tool payloads to action modules. Public API: execute, execute_async, preview_file_change.
 
 var editor_interface: EditorInterface = null
-var follow_agent: bool = true
+var follow_agent: bool = false
 
 var _node_actions: GodotAINode
 
@@ -84,7 +84,7 @@ func execute(output: Dictionary) -> Dictionary:
 		"get_export_vars":
 			return GodotAIInspector.execute_get_export_vars(self, output)
 		"check_errors":
-			return GodotAIEditorErrors.execute_check_errors(self, output)
+			return execute_check_errors(output)
 		"get_project_settings":
 			return GodotAIProject.execute_get_project_settings(self, output)
 		"get_autoloads":
@@ -145,7 +145,7 @@ func execute_async(output: Dictionary) -> Dictionary:
 		"get_export_vars":
 			return GodotAIInspector.execute_get_export_vars(self, output)
 		"check_errors":
-			return GodotAIEditorErrors.execute_check_errors(self, output)
+			return execute_check_errors(output)
 		"get_project_settings":
 			return GodotAIProject.execute_get_project_settings(self, output)
 		"get_autoloads":
@@ -166,3 +166,11 @@ func set_follow_agent(enabled: bool) -> void:
 
 func _execute_lint_file(_output: Dictionary) -> Dictionary:
 	return {"success": false, "message": "Lint is run via the RAG backend. Use the dock's lint flow.", "path": "", "output": ""}
+
+
+static func execute_check_errors(_output: Dictionary) -> Dictionary:
+	return {
+		"success": true,
+		"message": "Editor errors are shown in the Output/Debugger panel. Use lint_file(path) to check script errors for a specific file.",
+		"errors": [],
+	}

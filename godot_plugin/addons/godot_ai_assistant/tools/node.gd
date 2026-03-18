@@ -82,6 +82,8 @@ func execute_create_node(output: Dictionary) -> Dictionary:
 	parent.add_child(new_node)
 	new_node.owner = root
 	executor.editor_interface.save_scene()
+	if executor.follow_agent:
+		GodotAIFollowEditor.switch_main_screen_for_scene(executor.editor_interface)
 	var node_path_str := new_node.name
 	if parent != root:
 		var p := str(parent.get_path()).trim_prefix("/root/").trim_prefix("/")
@@ -140,6 +142,8 @@ func execute_set_node_property(output: Dictionary) -> Dictionary:
 		return {"success": false, "message": "Property not found or read-only: %s" % property_name}
 	target.set(property_name, parsed)
 	executor.editor_interface.save_scene()
+	if executor.follow_agent:
+		GodotAIFollowEditor.switch_main_screen_for_scene(executor.editor_interface)
 	var normalized := node_path.trim_prefix("/root/").trim_prefix("/")
 	var msg := "Set %s.%s" % [normalized, property_name]
 	if not executor.follow_agent and prev_scene_path != "" and prev_scene_path != scene_path:

@@ -1,17 +1,29 @@
-[gd_scene load_steps=4 format=3 uid="uid://godot_ai_dock"]
+[gd_scene load_steps=5 format=3 uid="uid://godot_ai_surface"]
 
-[ext_resource type="Script" path="res://addons/godot_ai_assistant/ai_dock.gd" id="1"]
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/ui/ai_surface.gd" id="1"]
 [ext_resource type="Script" path="res://addons/godot_ai_assistant/chat/prompt_input.gd" id="2"]
 [ext_resource type="Script" path="res://addons/godot_ai_assistant/chat/chat_drop_zone.gd" id="3"]
+[ext_resource type="PackedScene" path="res://addons/godot_ai_assistant/ui/components/chat_input_bar.tscn" id="4"]
 
-[node name="AIDock" type="Control"]
-layout_mode = 3
+[sub_resource type="StyleBoxFlat" id="ChatTabBar_bg"]
+bg_color = Color(0.16, 0.16, 0.18, 1)
+content_margin_left = 4.0
+content_margin_top = 4.0
+content_margin_right = 4.0
+content_margin_bottom = 2.0
+
+[node name="AISurface" type="Control"]
+layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
 grow_horizontal = 2
 grow_vertical = 2
-custom_minimum_size = Vector2(180, 120)
+custom_minimum_size = Vector2(0, 0)
 script = ExtResource("1")
 
 [node name="TabContainer" type="TabContainer" parent="."]
@@ -19,22 +31,37 @@ layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
 grow_horizontal = 2
 grow_vertical = 2
 clip_contents = true
 use_hidden_tabs_for_min_size = false
 
 [node name="Chat" type="Control" parent="TabContainer"]
-layout_mode = 2
-size_flags_horizontal = 3
-size_flags_vertical = 3
-unique_name_in_owner = true
-
-[node name="VBox" type="VBoxContainer" parent="TabContainer/Chat"]
-layout_mode = 2
+layout_mode = 1
 anchors_preset = 15
 anchor_right = 1.0
 anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
+grow_horizontal = 2
+grow_vertical = 2
+unique_name_in_owner = true
+
+[node name="VBox" type="VBoxContainer" parent="TabContainer/Chat"]
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 0.0
+offset_top = 0.0
+offset_right = 0.0
+offset_bottom = 0.0
 grow_horizontal = 2
 grow_vertical = 2
 theme_override_constants/separation = 4
@@ -46,32 +73,20 @@ size_flags_vertical = 3
 layout_mode = 2
 alignment = 0
 theme_override_constants/separation = 6
+size_flags_horizontal = 3
 
-[node name="ChatsLabel" type="Label" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
-layout_mode = 2
-theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
-theme_override_font_sizes/font_size = 13
-size_flags_horizontal = 0
-custom_minimum_size = Vector2(40, 0)
-text = "Chats"
-text_overrun_behavior = 3
-vertical_alignment = 1
-
-[node name="ChatTabBar" type="TabBar" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
-unique_name_in_owner = true
+[node name="ChatTabBarPanel" type="PanelContainer" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 layout_mode = 2
 size_flags_horizontal = 3
-custom_minimum_size = Vector2(60, 28)
-tab_alignment = 0
-tab_close_display_policy = 2
+theme_override_styles/panel = SubResource("ChatTabBar_bg")
 
-[node name="ContextUsageLabel" type="Label" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
+[node name="ChatTabBar" type="TabBar" parent="TabContainer/Chat/VBox/ChatTabBarRow/ChatTabBarPanel"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 0
-custom_minimum_size = Vector2(40, 0)
-text = "Ctx: 0%"
-text_overrun_behavior = 3
+custom_minimum_size = Vector2(0, 28)
+size_flags_horizontal = 3
+tab_alignment = 0
+tab_close_display_policy = 2
 
 [node name="NewChatButton" type="Button" parent="TabContainer/Chat/VBox/ChatTabBarRow"]
 unique_name_in_owner = true
@@ -83,6 +98,7 @@ text = "+ New"
 [node name="ActivityBlock" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
 theme_override_constants/separation = 2
+size_flags_horizontal = 3
 size_flags_vertical = 0
 
 [node name="CurrentActivityLabel" type="Label" parent="TabContainer/Chat/VBox/ActivityBlock"]
@@ -97,7 +113,7 @@ visible = false
 unique_name_in_owner = true
 layout_mode = 2
 visible = false
-text = "Thought history (0) ▶"
+text = "Thought history (0) >"
 
 [node name="ThoughtHistoryList" type="VBoxContainer" parent="TabContainer/Chat/VBox/ActivityBlock"]
 unique_name_in_owner = true
@@ -110,7 +126,7 @@ theme_override_constants/separation = 2
 unique_name_in_owner = true
 layout_mode = 2
 visible = false
-text = "Tool calls (0) ▶"
+text = "Tool calls (0) >"
 
 [node name="ToolCallsList" type="VBoxContainer" parent="TabContainer/Chat/VBox/ActivityBlock"]
 unique_name_in_owner = true
@@ -122,11 +138,13 @@ theme_override_constants/separation = 2
 [node name="IOContainer" type="VSplitContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
 size_flags_vertical = 3
+size_flags_horizontal = 3
 split_offset = 160
 collapsible = true
 
 [node name="ChatScroll" type="ScrollContainer" parent="TabContainer/Chat/VBox/IOContainer"]
 layout_mode = 2
+size_flags_horizontal = 3
 size_flags_vertical = 3
 custom_minimum_size = Vector2(0, 60)
 horizontal_scroll_mode = 2
@@ -136,44 +154,49 @@ script = ExtResource("3")
 unique_name_in_owner = true
 layout_mode = 2
 alignment = 0
-size_flags_horizontal = 0
+size_flags_horizontal = 3
 size_flags_vertical = 0
 theme_override_constants/separation = 8
 
 [node name="PinnedContextRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_horizontal = 3
 size_flags_vertical = 0
 theme_override_constants/separation = 6
 visible = false
 
-[node name="AddContextRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
+[node name="PromptRow" type="HBoxContainer" parent="TabContainer/Chat/VBox/IOContainer"]
 layout_mode = 2
 alignment = 0
-size_flags_vertical = 0
 theme_override_constants/separation = 6
+size_flags_horizontal = 3
+size_flags_vertical = 1
 
-[node name="AddCurrentScriptButton" type="Button" parent="TabContainer/Chat/VBox/IOContainer/AddContextRow"]
-layout_mode = 2
-size_flags_horizontal = 4
-size_flags_vertical = 0
-custom_minimum_size = Vector2(60, 0)
-text = "+ Add current script to context"
-tooltip_text = "Add the script currently open in the Script Editor to this chat's context (same as dragging the script tab)"
-
-[node name="PromptTextEdit" type="TextEdit" parent="TabContainer/Chat/VBox/IOContainer"]
+[node name="ChatInputBar" parent="TabContainer/Chat/VBox/IOContainer/PromptRow" instance=ExtResource("4")]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_horizontal = 3
 size_flags_vertical = 1
-custom_minimum_size = Vector2(0, 44)
-placeholder_text = "Ask a question... (drag files or scene nodes here, or use '+ Add current script' for the open script)"
-wrap_mode = 1
+
+[node name="PromptTextEdit" parent="TabContainer/Chat/VBox/IOContainer/PromptRow/ChatInputBar" index="0"]
+unique_name_in_owner = true
+placeholder_text = "Ask a question... (drag files or scene nodes here; the current script is included in context by default)"
 script = ExtResource("2")
+
+[node name="ModelOption" parent="TabContainer/Chat/VBox/IOContainer/PromptRow/ChatInputBar" index="1"]
+unique_name_in_owner = true
+theme_override_font_sizes/font_size = 13
+
+[node name="AskButton" parent="TabContainer/Chat/VBox/IOContainer/PromptRow/ChatInputBar" index="2"]
+unique_name_in_owner = true
+text = "Ask"
 
 [node name="BottomRow" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
 alignment = 0
 theme_override_constants/separation = 4
+size_flags_horizontal = 3
 size_flags_vertical = 0
 
 [node name="ToolRow" type="HFlowContainer" parent="TabContainer/Chat/VBox/BottomRow"]
@@ -181,37 +204,31 @@ layout_mode = 2
 alignment = 0
 theme_override_constants/h_separation = 6
 theme_override_constants/v_separation = 4
+size_flags_horizontal = 3
 
 [node name="ModelLabel" type="Label" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 layout_mode = 2
+size_flags_horizontal = 0
+size_flags_stretch_ratio = 0.35
 text = "Model"
 
 [node name="ModelOption" type="OptionButton" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_horizontal = 3
 custom_minimum_size = Vector2(56, 0)
 theme_override_font_sizes/font_size = 13
-
-[node name="AskButton" type="Button" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Ask"
-
-[node name="CopyButton" type="Button" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Copy"
-
-[node name="FollowAgentCheck" type="CheckButton" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
-unique_name_in_owner = true
-layout_mode = 2
-button_pressed = true
-text = "Follow"
+flat = true
 
 [node name="ContextViewerButton" type="Button" parent="TabContainer/Chat/VBox/BottomRow/ToolRow"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Context viewer"
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(120, 0)
+text = "Context"
+autowrap_mode = 0
+text_overrun_behavior = 3
+flat = true
 
 [node name="ContextViewerPanel" type="VBoxContainer" parent="TabContainer/Chat/VBox"]
 layout_mode = 2
@@ -233,96 +250,6 @@ layout_mode = 2
 theme_override_colors/font_color = Color(0.5, 0.5, 0.5, 1)
 text = "Send a message to see context for this chat."
 visible = false
-
-[node name="History" type="Control" parent="TabContainer"]
-layout_mode = 2
-size_flags_horizontal = 3
-size_flags_vertical = 3
-unique_name_in_owner = true
-
-[node name="Margin" type="MarginContainer" parent="TabContainer/History"]
-layout_mode = 2
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-theme_override_constants/margin_left = 12
-theme_override_constants/margin_top = 12
-theme_override_constants/margin_right = 12
-theme_override_constants/margin_bottom = 12
-
-[node name="HistoryVBox" type="VBoxContainer" parent="TabContainer/History/Margin"]
-layout_mode = 2
-anchors_preset = 15
-anchor_right = 1.0
-anchor_bottom = 1.0
-grow_horizontal = 2
-grow_vertical = 2
-theme_override_constants/separation = 8
-
-[node name="HistoryTopRow" type="HBoxContainer" parent="TabContainer/History/Margin/HistoryVBox"]
-layout_mode = 2
-theme_override_constants/separation = 8
-
-[node name="HistoryLabel" type="Label" parent="TabContainer/History/Margin/HistoryVBox/HistoryTopRow"]
-layout_mode = 2
-text = "Edit history"
-
-[node name="HistoryRefreshButton" type="Button" parent="TabContainer/History/Margin/HistoryVBox/HistoryTopRow"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Refresh"
-
-[node name="HistorySplit" type="HSplitContainer" parent="TabContainer/History/Margin/HistoryVBox"]
-layout_mode = 2
-size_flags_vertical = 3
-split_offset = 200
-collapsible = true
-
-[node name="HistoryList" type="ItemList" parent="TabContainer/History/Margin/HistoryVBox/HistorySplit"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 3
-
-[node name="HistoryDetailVBox" type="VBoxContainer" parent="TabContainer/History/Margin/HistoryVBox/HistorySplit"]
-layout_mode = 2
-size_flags_horizontal = 3
-theme_override_constants/separation = 6
-
-[node name="HistoryDetailLabel" type="RichTextLabel" parent="TabContainer/History/Margin/HistoryVBox/HistorySplit/HistoryDetailVBox"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_vertical = 3
-scroll_active = true
-bbcode_enabled = true
-
-[node name="HistoryUndoButton" type="Button" parent="TabContainer/History/Margin/HistoryVBox/HistorySplit/HistoryDetailVBox"]
-unique_name_in_owner = true
-layout_mode = 2
-text = "Undo selected edit"
-
-[node name="HistoryUsageVBox" type="VBoxContainer" parent="TabContainer/History/Margin/HistoryVBox"]
-layout_mode = 2
-theme_override_constants/separation = 4
-
-[node name="HistoryUsageTitle" type="Label" parent="TabContainer/History/Margin/HistoryVBox/HistoryUsageVBox"]
-layout_mode = 2
-text = "Usage"
-
-[node name="HistoryUsageLabel" type="Label" parent="TabContainer/History/Margin/HistoryVBox/HistoryUsageVBox"]
-unique_name_in_owner = true
-layout_mode = 2
-theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
-theme_override_font_sizes/font_size = 12
-text = "Tokens: —  |  Est. cost: —"
-autowrap_mode = 2
-
-[node name="Settings" type="Control" parent="TabContainer"]
-layout_mode = 2
-size_flags_horizontal = 3
-size_flags_vertical = 3
-unique_name_in_owner = true
 
 [node name="Changes" type="Control" parent="TabContainer"]
 layout_mode = 2
@@ -353,7 +280,7 @@ theme_override_constants/separation = 8
 
 [node name="PendingLabel" type="Label" parent="TabContainer/Changes/Margin/ChangesVBox"]
 layout_mode = 2
-text = "Changes apply automatically. Select an item below to view diff or Revert."
+text = "Select a change to open it in the editor (green/yellow/red highlights). Revert from timeline."
 
 [node name="ChangesSplit" type="HSplitContainer" parent="TabContainer/Changes/Margin/ChangesVBox"]
 layout_mode = 2
@@ -389,45 +316,45 @@ text = "Reject"
 
 [node name="TimelineLabel" type="Label" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/LeftVBox"]
 layout_mode = 2
-text = "AI change timeline"
+text = "History"
 
 [node name="TimelineList" type="ItemList" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/LeftVBox"]
 unique_name_in_owner = true
 layout_mode = 2
 size_flags_vertical = 3
 
-[node name="RightVBox" type="VBoxContainer" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit"]
-layout_mode = 2
-size_flags_horizontal = 3
-theme_override_constants/separation = 6
-
-[node name="DiffLabel" type="Label" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox"]
-layout_mode = 2
-text = "Diff preview"
-
-[node name="DiffSplit" type="HSplitContainer" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox"]
-layout_mode = 2
-size_flags_vertical = 3
-custom_minimum_size = Vector2(120, 80)
-split_offset = 360
-
-[node name="OldText" type="TextEdit" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox/DiffSplit"]
+[node name="HistoryScroll" type="ScrollContainer" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/LeftVBox"]
 unique_name_in_owner = true
 layout_mode = 2
-size_flags_horizontal = 3
 size_flags_vertical = 3
-custom_minimum_size = Vector2(40, 40)
-editable = false
-placeholder_text = "Old content"
+visible = false
 
-[node name="NewText" type="TextEdit" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/RightVBox/DiffSplit"]
+[node name="HistoryListVBox" type="VBoxContainer" parent="TabContainer/Changes/Margin/ChangesVBox/ChangesSplit/LeftVBox/HistoryScroll"]
+layout_mode = 2
+size_flags_horizontal = 3
+theme_override_constants/separation = 2
+
+[node name="HistoryUsageVBox" type="VBoxContainer" parent="TabContainer/Changes/Margin/ChangesVBox"]
+layout_mode = 2
+theme_override_constants/separation = 4
+
+[node name="HistoryUsageTitle" type="Label" parent="TabContainer/Changes/Margin/ChangesVBox/HistoryUsageVBox"]
+layout_mode = 2
+text = "Usage"
+
+[node name="HistoryUsageLabel" type="Label" parent="TabContainer/Changes/Margin/ChangesVBox/HistoryUsageVBox"]
 unique_name_in_owner = true
+layout_mode = 2
+theme_override_colors/font_color = Color(0.6, 0.6, 0.6, 1)
+theme_override_font_sizes/font_size = 12
+text = "Tokens: -  |  Est. cost: -"
+autowrap_mode = 2
+
+[node name="Settings" type="Control" parent="TabContainer"]
 layout_mode = 2
 size_flags_horizontal = 3
 size_flags_vertical = 3
-custom_minimum_size = Vector2(40, 40)
-editable = false
-placeholder_text = "New content"
+unique_name_in_owner = true
 
 [node name="Margin" type="MarginContainer" parent="TabContainer/Settings"]
 layout_mode = 2
@@ -477,11 +404,21 @@ min_value = 10.0
 max_value = 24.0
 value = 14.0
 
-[node name="SettingsWordWrapCheck" type="CheckButton" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection"]
+[node name="WordWrapRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection"]
+layout_mode = 2
+theme_override_constants/separation = 8
+
+[node name="WordWrapLabel" type="Label" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/WordWrapRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Word wrap output"
+
+[node name="SettingsWordWrapCheck" type="CheckButton" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/DisplaySection/WordWrapRow"]
 unique_name_in_owner = true
 layout_mode = 2
+size_flags_horizontal = 0
 button_pressed = true
-text = "Word wrap output"
+text = ""
 
 [node name="AISection" type="VBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox"]
 layout_mode = 2
@@ -508,20 +445,6 @@ unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 placeholder_text = "http://127.0.0.1:8000"
-
-[node name="BackendRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection"]
-layout_mode = 2
-theme_override_constants/separation = 8
-
-[node name="Label" type="Label" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BackendRow"]
-layout_mode = 2
-size_flags_stretch_ratio = 0.35
-text = "Backend"
-
-[node name="SettingsBackendOption" type="OptionButton" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/BackendRow"]
-unique_name_in_owner = true
-layout_mode = 2
-size_flags_horizontal = 3
 
 [node name="ApiKeyRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection"]
 layout_mode = 2
@@ -568,14 +491,25 @@ unique_name_in_owner = true
 layout_mode = 2
 size_flags_horizontal = 3
 
-[node name="SettingsButtons" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox"]
+[node name="FollowAgentRow" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection"]
 layout_mode = 2
 theme_override_constants/separation = 8
 
-[node name="SettingsSaveButton" type="Button" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/SettingsButtons"]
+[node name="FollowAgentLabel" type="Label" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/FollowAgentRow"]
+layout_mode = 2
+size_flags_horizontal = 3
+text = "Follow agent (auto-focus edited files and nodes)"
+
+[node name="SettingsFollowAgentCheck" type="CheckButton" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/AISection/FollowAgentRow"]
 unique_name_in_owner = true
 layout_mode = 2
-text = "Save"
+size_flags_horizontal = 0
+button_pressed = false
+text = ""
+
+[node name="SettingsButtons" type="HBoxContainer" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox"]
+layout_mode = 2
+theme_override_constants/separation = 8
 
 [node name="RefreshIndicatorsButton" type="Button" parent="TabContainer/Settings/Margin/Scroll/SettingsVBox/SettingsButtons"]
 unique_name_in_owner = true
@@ -622,3 +556,4 @@ unique_name_in_owner = true
 
 [node name="HTTPRequest" type="HTTPRequest" parent="."]
 unique_name_in_owner = true
+

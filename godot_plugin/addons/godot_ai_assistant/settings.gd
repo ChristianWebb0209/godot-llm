@@ -2,10 +2,13 @@
 extends RefCounted
 class_name GodotAISettings
 
-## Persists AI Assistant settings to a config file in the editor data directory.
-## Call load_settings() after EditorInterface is set; use save_settings() to persist.
+## Persists AI Assistant settings to a config file in the user's app data (same location
+## as Godot editor config: e.g. %APPDATA%\Godot on Windows). Does not rely on EditorPaths;
+## path is built from OS so it works even when editor paths are unavailable.
+## Call load_settings() when the plugin opens; use save_settings() to persist.
 
 const CONFIG_SECTION := "godot_ai_assistant"
+const CONFIG_FILENAME := "godot_ai_assistant_settings.cfg"
 const KEY_TEXT_SIZE := "text_size"
 const KEY_WORD_WRAP := "word_wrap"
 const KEY_RAG_URL := "rag_service_url"
@@ -53,7 +56,7 @@ var openai_base_url: String = ""
 var selected_model: String = DEFAULT_MODEL
 var backend_profile_id: String = DEFAULT_BACKEND_PROFILE
 var composer_model: String = DEFAULT_COMPOSER_MODEL
-var follow_agent: bool = true
+var follow_agent: bool = false
 var allow_editor_actions: bool = true
 var auto_lint_after_edit: bool = true
 
@@ -63,14 +66,50 @@ func set_editor_interface(e: EditorInterface) -> void:
 	if _editor_interface:
 		var paths: EditorPaths = _editor_interface.get_editor_paths()
 		if paths:
-			_config_path = paths.get_data_dir().path_join("godot_ai_assistant_settings.cfg")
+			var dir: String = paths.get_data_dir()
+			if not dir.is_empty():
+				_config_path = dir.path_join(CONFIG_FILENAME)
+
+
+## Returns the path to the settings file. Prefers EditorPaths when set; otherwise uses
+## OS-specific app data so storage works without relying on editor lifecycle.
+func _get_config_path() -> String:
+	if not _config_path.is_empty():
+		return _config_path
+	var base_dir: String = ""
+	if OS.get_name() == "Windows":
+		base_dir = OS.get_environment("APPDATA")
+		if base_dir.is_empty():
+			base_dir = OS.get_environment("USERPROFILE").path_join("AppData").path_join("Roaming")
+		base_dir = base_dir.path_join("Godot")
+	elif OS.get_name() == "macOS":
+		var home: String = OS.get_environment("HOME")
+		if home.is_empty():
+			home = "~/"
+		base_dir = home.path_join("Library").path_join("Application Support").path_join("Godot")
+	else:
+		# Linux/BSD: XDG_CONFIG_HOME or ~/.config
+		base_dir = OS.get_environment("XDG_CONFIG_HOME")
+		if base_dir.is_empty():
+			var home: String = OS.get_environment("HOME")
+			if home.is_empty():
+				home = "~/"
+			base_dir = home.path_join(".config")
+		base_dir = base_dir.path_join("godot")
+	if base_dir.is_empty():
+		return ""
+	_config_path = base_dir.path_join(CONFIG_FILENAME)
+	return _config_path
 
 
 func load_settings() -> void:
-	if _config_path.is_empty():
+	var path := _get_config_path()
+	if path.is_empty():
+		return
+	if not FileAccess.file_exists(path):
 		return
 	var cfg := ConfigFile.new()
-	var err := cfg.load(_config_path)
+	var err := cfg.load(path)
 	if err != OK:
 		return
 	text_size = cfg.get_value(CONFIG_SECTION, KEY_TEXT_SIZE, DEFAULT_TEXT_SIZE) as int
@@ -82,14 +121,18 @@ func load_settings() -> void:
 	selected_model = cfg.get_value(CONFIG_SECTION, KEY_SELECTED_MODEL, DEFAULT_MODEL) as String
 	backend_profile_id = cfg.get_value(CONFIG_SECTION, KEY_BACKEND_PROFILE, DEFAULT_BACKEND_PROFILE) as String
 	composer_model = cfg.get_value(CONFIG_SECTION, KEY_COMPOSER_MODEL, DEFAULT_COMPOSER_MODEL) as String
-	follow_agent = cfg.get_value(CONFIG_SECTION, KEY_FOLLOW_AGENT, true) as bool
+	follow_agent = cfg.get_value(CONFIG_SECTION, KEY_FOLLOW_AGENT, false) as bool
 	allow_editor_actions = cfg.get_value(CONFIG_SECTION, KEY_ALLOW_EDITOR_ACTIONS, true) as bool
 	auto_lint_after_edit = cfg.get_value(CONFIG_SECTION, KEY_AUTO_LINT_AFTER_EDIT, true) as bool
 
 
 func save_settings() -> void:
-	if _config_path.is_empty():
+	var path := _get_config_path()
+	if path.is_empty():
 		return
+	var dir_path: String = path.get_base_dir()
+	if not dir_path.is_empty():
+		DirAccess.make_dir_recursive_absolute(dir_path)
 	var cfg := ConfigFile.new()
 	cfg.set_value(CONFIG_SECTION, KEY_TEXT_SIZE, text_size)
 	cfg.set_value(CONFIG_SECTION, KEY_WORD_WRAP, word_wrap)
@@ -103,7 +146,7 @@ func save_settings() -> void:
 	cfg.set_value(CONFIG_SECTION, KEY_FOLLOW_AGENT, follow_agent)
 	cfg.set_value(CONFIG_SECTION, KEY_ALLOW_EDITOR_ACTIONS, allow_editor_actions)
 	cfg.set_value(CONFIG_SECTION, KEY_AUTO_LINT_AFTER_EDIT, auto_lint_after_edit)
-	cfg.save(_config_path)
+	cfg.save(path)
 
 
 func get_openai_models() -> Array[String]:

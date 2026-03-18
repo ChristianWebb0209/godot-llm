@@ -17,21 +17,24 @@ func _get_dock() -> GodotAIDock:
 func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
 	if data == null:
 		return false
-	# FileSystem dock: data["files"] = PackedStringArray
+	# Script editor selection: plain text (drag from CodeEdit)
+	if data is String:
+		return (data as String).strip_edges().length() > 0
 	if data is Dictionary:
 		var d: Dictionary = data
+		# Selection text from right-click or custom drag
+		if str(d.get("selection_text", d.get("text", ""))).strip_edges().length() > 0:
+			return true
 		if d.has("files"):
 			var files: Variant = d["files"]
 			if files is PackedStringArray and (files as PackedStringArray).size() > 0:
 				return true
 			if files is Array and (files as Array).size() > 0:
 				return true
-		# Scene tree: data["nodes"] (array of NodePath or node dicts)
 		if d.has("nodes"):
 			var nodes: Variant = d["nodes"]
 			if nodes is Array and (nodes as Array).size() > 0:
 				return true
-		# Single resource/script (e.g. script tab drag)
 		if d.has("resource_path") and str(d.get("resource_path", "")).strip_edges().length() > 0:
 			return true
 		if d.has("script") and d["script"] != null:
@@ -40,7 +43,7 @@ func _can_drop_data(_at_position: Vector2, data: Variant) -> bool:
 
 
 func _drop_data(_at_position: Vector2, data: Variant) -> void:
-	var dock := _get_dock()
+	var dock: GodotAIDock = _get_dock()
 	if dock == null:
 		return
 	dock.add_pinned_context_from_drag_data(data)

@@ -25,7 +25,7 @@ static func execute_get_export_vars(executor: GodotAIEditorToolExecutor, output:
 	var exports: Array = []
 	for p in props:
 		var d: Dictionary = p
-		if (d.get("usage", 0) as int) & 512:  # PROPERTY_USAGE_SCRIPT_VARIABLE
+		if (d.get("usage", 0) as int) & PROPERTY_USAGE_SCRIPT_VARIABLE:
 			exports.append({
 				"name": d.get("name", ""),
 				"type": d.get("type", TYPE_NIL),

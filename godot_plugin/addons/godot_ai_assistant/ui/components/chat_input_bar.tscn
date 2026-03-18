@@ -1,0 +1,31 @@
+[gd_scene load_steps=2 format=3 uid="uid://ai_chat_input_bar"]
+
+[ext_resource type="Script" path="res://addons/godot_ai_assistant/ui/components/chat_input_bar.gd" id="1"]
+
+[node name="ChatInputBar" type="HBoxContainer"]
+script = ExtResource("1")
+layout_mode = 2
+theme_override_constants/separation = 6
+size_flags_horizontal = 3
+size_flags_vertical = 1
+
+[node name="PromptTextEdit" type="TextEdit" parent="."]
+layout_mode = 2
+size_flags_horizontal = 3
+size_flags_vertical = 1
+custom_minimum_size = Vector2(0, 44)
+custom_maximum_size = Vector2(0, 44)
+wrap_mode = 0
+
+[node name="ModelOption" type="OptionButton" parent="."]
+layout_mode = 2
+size_flags_horizontal = 0
+custom_minimum_size = Vector2(56, 0)
+flat = true
+
+[node name="AskButton" type="Button" parent="."]
+layout_mode = 2
+size_flags_horizontal = 0
+size_flags_vertical = 1
+text = "Send"
+
