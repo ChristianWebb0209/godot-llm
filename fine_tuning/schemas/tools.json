@@ -108,11 +108,11 @@
         "language": {
           "type": "string",
           "description": "gdscript or csharp",
-          "default": "gdscript",
           "enum": [
             "gdscript",
             "csharp"
-          ]
+          ],
+          "default": "gdscript"
         },
         "extends_class": {
           "type": "string",
@@ -127,7 +127,6 @@
         "template": {
           "type": "string",
           "description": "Optional boilerplate template to use.",
-          "default": "",
           "enum": [
             "",
             "character_2d",
@@ -136,7 +135,8 @@
             "area_2d",
             "area_3d",
             "node"
-          ]
+          ],
+          "default": ""
         }
       },
       "required": [
@@ -181,11 +181,11 @@
       "properties": {
         "target_type": {
           "type": "string",
-          "description": "Either 'node' or 'import'.",
           "enum": [
             "node",
             "import"
-          ]
+          ],
+          "description": "Either 'node' or 'import'."
         },
         "attribute": {
           "type": "string",
