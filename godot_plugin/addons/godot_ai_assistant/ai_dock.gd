@@ -96,6 +96,7 @@ var _http_handler: GodotAIHttpRequestHandler = null
 var _tool_follow_up: GodotAIToolFollowUp = null
 var _editor_chrome: GodotAIEditorChrome = null
 var _chat_ux: GodotAIChatUX = null
+var _dock_tabs_controller = null
 var _history_events: Array = []
 var _selected_history_edit_id: String = ""
 var _ask_icon_idle: Texture2D = null
@@ -149,7 +150,6 @@ var _last_lint_output: String = ""
 # Re-run lint after edits and send follow-up until clean or cap (so we fix all errors, not just the first).
 const LINT_FOLLOW_UP_CAP := 5
 var _lint_follow_up_count_this_turn: int = 0
-var _last_main_tab: int = 0
 
 func set_editor_interface(e: EditorInterface) -> void:
 	_editor_interface = e
@@ -184,6 +184,7 @@ func set_editor_interface(e: EditorInterface) -> void:
 	_tool_follow_up = GodotAIToolFollowUp.new(self)
 	_editor_chrome = GodotAIEditorChrome.new(self)
 	_chat_ux = GodotAIChatUX.new(self)
+	_dock_tabs_controller = preload("res://addons/godot_ai_assistant/dock/dock_tabs_controller.gd").new(self)
 	if _editor_interface:
 		var base := _editor_interface.get_base_control()
 		if base:
@@ -579,207 +580,13 @@ func _set_status(t: String) -> void:
 
 
 func _ready() -> void:
-	print("AI Assistant: _ready called on dock")
-	# Use the layout from the scene; let Godot's dock system drive our size.
-	# Auto-focus prompt when user clicks onto the dock or switches to Chat tab.
-	focus_mode = Control.FOCUS_ALL
-	focus_entered.connect(func() -> void:
-		if _chat_ux == null:
-			_chat_ux = GodotAIChatUX.new(self)
-		_chat_ux.on_dock_focus_entered()
-	)
-	if tab_container:
-		tab_container.focus_entered.connect(func() -> void:
-			if _chat_ux == null:
-				_chat_ux = GodotAIChatUX.new(self)
-			_chat_ux.on_dock_focus_entered()
-		)
-		tab_container.focus_exited.connect(func() -> void:
-			if _chat_ux == null:
-				_chat_ux = GodotAIChatUX.new(self)
-			_chat_ux.on_dock_focus_exited()
-		)
-	if _typewriter_timer == null:
-		_typewriter_timer = Timer.new()
-		_typewriter_timer.wait_time = 0.028
-		_typewriter_timer.timeout.connect(_on_typewriter_timer_timeout)
-		add_child(_typewriter_timer)
-	output_text_edit = get_node_or_null("TabContainer/Chat/VBox/IOContainer/OutputText") as RichTextLabel
-	status_label = get_node_or_null("TabContainer/Chat/VBox/BottomRow/StatusLabel") as Label
-	var settings_root: Node = get_node_or_null("TabContainer/Settings/Margin/Scroll/SettingsVBox")
-	if settings_root:
-		follow_agent_check = settings_root.get_node_or_null("AISection/FollowAgentRow/SettingsFollowAgentCheck") as CheckButton
-		settings_text_size_spin = settings_root.get_node_or_null("DisplaySection/TextSizeRow/SettingsTextSizeSpin") as SpinBox
-		settings_word_wrap_check = settings_root.get_node_or_null("DisplaySection/WordWrapRow/SettingsWordWrapCheck") as CheckButton
-		settings_rag_url_edit = settings_root.get_node_or_null("AISection/RagUrlRow/SettingsRagUrlEdit") as LineEdit
-		settings_backend_option = settings_root.get_node_or_null("AISection/BackendRow/SettingsBackendOption") as OptionButton
-		settings_api_key_edit = settings_root.get_node_or_null("AISection/ApiKeyRow/SettingsApiKeyEdit") as LineEdit
-		settings_base_url_edit = settings_root.get_node_or_null("AISection/BaseUrlRow/SettingsBaseUrlEdit") as LineEdit
-		settings_model_option = settings_root.get_node_or_null("AISection/SettingsModelRow/SettingsModelOption") as OptionButton
-		settings_save_button = settings_root.get_node_or_null("SettingsButtons/SettingsSaveButton") as Button
-		refresh_indicators_button = settings_root.get_node_or_null("SettingsButtons/RefreshIndicatorsButton") as Button
-		indexing_content = settings_root.get_node_or_null("IndexingSection/IndexingContent") as Label
-		context_windows_list = settings_root.get_node_or_null("ContextSection/ContextWindowsList") as VBoxContainer
-	if output_text_edit:
-		output_text_edit.bbcode_enabled = true
-		if output_text_edit.resized.is_connected(_chat_renderer.render_chat_log) == false:
-			output_text_edit.resized.connect(_chat_renderer.render_chat_log)
-	if ask_button:
-		ask_button.text = ""
-		ask_button.flat = false
-		ask_button.custom_minimum_size = Vector2(32, 32)
-		ask_button.pressed.connect(_chat_streaming.on_ask_pressed)
-		_chat_ux.update_ask_button_state()
-	else:
-		print("AI Assistant: ask_button is null")
-	if prompt_text_edit:
-		# Keep the input a fixed single-row height; let long placeholder/text overflow horizontally.
-		prompt_text_edit.wrap_mode = TextEdit.LINE_WRAPPING_NONE
-		prompt_text_edit.scroll_fit_content_height = false
-		prompt_text_edit.scroll_past_end_of_file = false
-		prompt_text_edit.gui_input.connect(func(event: InputEvent) -> void:
-			if _chat_ux == null:
-				_chat_ux = GodotAIChatUX.new(self)
-			_chat_ux.on_prompt_text_edit_gui_input(event)
-		)
-		prompt_text_edit.text_changed.connect(_chat_ux.update_ask_button_state)
-
-	if http_request:
-		http_request.request_completed.connect(_http_handler.on_http_request_completed)
-	else:
-		print("AI Assistant: http_request is null")
-
-	if new_chat_button:
-		new_chat_button.pressed.connect(_on_new_chat_pressed)
-	if chat_tab_bar:
-		chat_tab_bar.drag_to_rearrange_enabled = true
-		chat_tab_bar.tab_selected.connect(_on_chat_tab_selected)
-		if chat_tab_bar.has_signal("active_tab_rearranged"):
-			chat_tab_bar.active_tab_rearranged.connect(_on_chat_tab_rearranged)
-		if chat_tab_bar.has_signal("tab_close_pressed"):
-			chat_tab_bar.tab_close_pressed.connect(_chat_state.on_chat_tab_close_pressed)
-		if _editor_chrome == null:
-			_editor_chrome = GodotAIEditorChrome.new(self)
-		_editor_chrome.apply_chat_tab_bar_editor_style()
-	if model_option:
-		model_option.item_selected.connect(_settings_tab.on_model_selected)
-		var popup := model_option.get_popup()
-		if popup:
-			popup.about_to_popup.connect(_settings_tab.on_model_popup_about_to_popup)
-	if follow_agent_check:
-		follow_agent_check.toggled.connect(_settings_tab.on_follow_agent_toggled)
-	if tab_container:
-		tab_container.tab_changed.connect(_on_main_tab_changed)
-		# Enable drag-to-reorder on main tabs (Chat, History, Settings)
-		var main_tab_bar: TabBar = tab_container.get_tab_bar()
-		if main_tab_bar:
-			main_tab_bar.drag_to_rearrange_enabled = true
-		# Clear, readable tab labels; Settings is furthest right by default (tab order in scene)
-		if tab_container.get_tab_count() >= 3:
-			tab_container.set_tab_title(0, "Chat")
-			tab_container.set_tab_title(1, "History")
-			tab_container.set_tab_title(2, "Settings")
-	if settings_save_button:
-		settings_save_button.pressed.connect(_settings_tab.on_settings_save_pressed)
-	# Auto-save and apply whenever any setting changes (persist to OS config immediately).
-	if settings_text_size_spin:
-		settings_text_size_spin.value_changed.connect(_settings_tab.on_settings_changed)
-	if settings_word_wrap_check:
-		settings_word_wrap_check.toggled.connect(_settings_tab.on_settings_changed)
-	if settings_rag_url_edit:
-		settings_rag_url_edit.focus_exited.connect(_settings_tab.on_settings_changed)
-	if settings_api_key_edit:
-		settings_api_key_edit.focus_exited.connect(_settings_tab.on_settings_changed)
-	if settings_base_url_edit:
-		settings_base_url_edit.focus_exited.connect(_settings_tab.on_settings_changed)
-	if settings_model_option:
-		settings_model_option.item_selected.connect(_settings_tab.on_settings_model_selected)
-	if settings_backend_option:
-		settings_backend_option.item_selected.connect(_settings_tab.on_settings_backend_selected)
-	if index_status_request:
-		index_status_request.request_completed.connect(_settings_tab.on_index_status_request_completed)
-	if refresh_indicators_button:
-		refresh_indicators_button.pressed.connect(_settings_tab.on_refresh_indicators_pressed)
-	if pending_list:
-		pending_list.item_selected.connect(_changes_tab.on_pending_item_selected)
-	if pending_accept_button:
-		pending_accept_button.text = "Revert selected"
-		pending_accept_button.pressed.connect(_changes_tab.on_revert_selected_pressed)
-	if pending_reject_button:
-		pending_reject_button.visible = false
-	if timeline_list:
-		timeline_list.item_selected.connect(_changes_tab.on_timeline_item_selected)
-		history_list = timeline_list
-	if thought_history_button:
-		thought_history_button.pressed.connect(_on_thought_history_toggled)
-	if tool_calls_button:
-		tool_calls_button.pressed.connect(_on_tool_calls_toggled)
-	# Activity (Thinking... / Tool call: X) is shown inline at bottom of chat, not at top.
-	if current_activity_label:
-		current_activity_label.visible = false
-	if context_viewer_button:
-		context_viewer_button.pressed.connect(_on_context_viewer_button_pressed)
-	if chat_scroll and chat_message_list:
-		chat_scroll.resized.connect(_update_chat_message_list_min_width)
-		call_deferred("_update_chat_message_list_min_width")
-		chat_message_list.add_theme_constant_override("separation", 12)
-		chat_scroll.gui_input.connect(_chat_context_menu_ctrl.on_chat_gui_input)
-		var vbar: VScrollBar = chat_scroll.get_v_scroll_bar()
-		if vbar != null:
-			vbar.value_changed.connect(_on_chat_scroll_value_changed)
-	_chat_context_menu = PopupMenu.new()
-	_chat_context_menu.id_pressed.connect(_chat_context_menu_ctrl.on_menu_id_pressed)
-	add_child(_chat_context_menu)
-	_export_file_dialog = EditorFileDialog.new()
-	_export_file_dialog.file_mode = EditorFileDialog.FILE_MODE_SAVE_FILE
-	_export_file_dialog.add_filter("Text file (*.txt)", "*.txt")
-	_export_file_dialog.add_filter("Markdown (*.md)", "*.md")
-	_export_file_dialog.title = "Export chat"
-	_export_file_dialog.file_selected.connect(_chat_context_menu_ctrl.export_chat_to_path)
-	add_child(_export_file_dialog)
-
-	if _settings_tab:
-		_settings_tab.apply_settings_from_config()
-	_chat_ux.update_context_usage_label()
-	if _chat_state:
-		_chat_state.ensure_default_chat()
-		_chat_state.update_chat_tab_close_visibility()
-	_refresh_pinned_context_row()
-	if _settings_tab:
-		_settings_tab.refresh_settings_tab_from_config()
-	if tab_container:
-		_last_main_tab = tab_container.current_tab
-	if _http_handler == null:
-		_http_handler = GodotAIHttpRequestHandler.new(self)
-	_http_handler.start_health_check()
-	if _changes_tab:
-		_changes_tab.render_changes_tab()
-	if _editor_chrome == null:
-		_editor_chrome = GodotAIEditorChrome.new(self)
-	_editor_chrome.start_decoration_refresh()
-	# Deferred so editor docks (FileSystem, Script, Scene) are built; then retry once after a short delay.
-	call_deferred("_apply_editor_decorations")
-	var late_timer := Timer.new()
-	late_timer.wait_time = 0.6
-	late_timer.one_shot = true
-	late_timer.timeout.connect(_apply_editor_decorations)
-	add_child(late_timer)
-	late_timer.start()
-
-
-# Editor chrome extracted to GodotAIEditorChrome (tab bar style + decoration refresh timer).
+	preload("res://addons/godot_ai_assistant/dock/dock_ready_wiring.gd").new(self).run_ready()
 
 
 func _focus_prompt_for_interject() -> void:
 	if _chat_ux == null:
 		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.focus_prompt_input()
-
-
-# Focus behavior implemented in GodotAIChatUX.
-
-
-
 
 
 ## Send a message as the current chat (used by Agent Manager or other views). Caller clears their prompt.
@@ -797,39 +604,26 @@ func get_current_chat_exclude_context_keys() -> Array:
 
 ## Drag-to-context: add items from editor drag data (FileSystem files, Scene tree nodes, script tabs, or script selection text).
 func add_pinned_context_from_drag_data(data: Variant) -> void:
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	_pinned_context.add_from_drag_data(data)
 
 
 func _pinned_context_contains(pinned: Array, entry: Dictionary) -> bool:
-	# Legacy wrapper (kept temporarily for compatibility while refactoring).
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	return _pinned_context.contains_entry(pinned, entry)
 
 
 func get_current_chat_pinned_context() -> Array:
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	return _pinned_context.get_current()
 
 
 func remove_pinned_context(chat_index: int, entry_index: int) -> void:
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	_pinned_context.remove_entry(chat_index, entry_index)
 
 
 func _build_pinned_context_extra() -> Dictionary:
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	return _pinned_context.build_extra()
 
 
 func _refresh_pinned_context_row() -> void:
-	if _pinned_context == null:
-		_pinned_context = GodotAIPinnedContext.new(self)
 	_pinned_context.refresh_row()
 
 
@@ -846,8 +640,6 @@ func _deferred_send_question(
 	override_file_text: String = "",
 	lint_output_override: String = ""
 ) -> void:
-	if _chat_streaming == null:
-		_chat_streaming = GodotAIChatStreaming.new(self)
 	_chat_streaming.deferred_send_question(question, use_tools, override_file_path, override_file_text, lint_output_override)
 
 
@@ -856,14 +648,10 @@ func _deferred_send_question(
 
 
 func _copy_message_at_index(msg_index: int) -> void:
-	if _chat_context_menu_ctrl == null:
-		_chat_context_menu_ctrl = GodotAIChatContextMenu.new(self)
 	_chat_context_menu_ctrl.copy_message_at_index(msg_index)
 
 
 func _copy_whole_chat() -> void:
-	if _chat_context_menu_ctrl == null:
-		_chat_context_menu_ctrl = GodotAIChatContextMenu.new(self)
 	_chat_context_menu_ctrl.copy_whole_chat()
 
 
@@ -875,55 +663,38 @@ func _is_stream_cancelled() -> bool:
 
 ## Parse streamed content into reasoning (think block) and answer. Returns { reasoning: String, answer: String }.
 func _parse_think_and_answer(raw: String) -> Dictionary:
-	# Backwards-compat wrapper.
-	if _chat_streaming == null:
-		_chat_streaming = GodotAIChatStreaming.new(self)
 	return _chat_streaming.parse_think_and_answer(raw)
 
 
 func _async_stream_request(endpoint: String, _headers: PackedStringArray, body: String) -> void:
-	if _chat_streaming == null:
-		_chat_streaming = GodotAIChatStreaming.new(self)
 	await _chat_streaming.async_stream_request(endpoint, body)
 
 
 func _on_stream_chunk(delta: String) -> void:
-	if _chat_streaming == null:
-		_chat_streaming = GodotAIChatStreaming.new(self)
 	_chat_streaming.on_stream_chunk(delta)
 
 
 func _on_stream_done(full_text: String, error_message: String = "") -> void:
-	if _chat_streaming == null:
-		_chat_streaming = GodotAIChatStreaming.new(self)
 	_chat_streaming.on_stream_done(full_text, error_message)
 
 
 
 
 func _update_chat_message_list_min_width() -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.update_chat_message_list_min_width()
 
 
 
 
 func _on_context_viewer_button_pressed() -> void:
-	if _context_viewer == null:
-		_context_viewer = GodotAIContextViewer.new(self)
 	_context_viewer.toggle()
 
 
 func _refresh_context_viewer_panel() -> void:
-	if _context_viewer == null:
-		_context_viewer = GodotAIContextViewer.new(self)
 	_context_viewer.refresh()
 
 
 func _toggle_exclude_context_block(block_key: String) -> void:
-	if _context_viewer == null:
-		_context_viewer = GodotAIContextViewer.new(self)
 	_context_viewer.toggle_exclude(block_key)
 
 
@@ -932,58 +703,40 @@ func _escape_bbcode(t: String) -> String:
 
 
 func scroll_output_to_bottom() -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.scroll_output_to_bottom()
 
 
 ## Only smooth-scroll to bottom if the user hasn't scrolled away. Used during streaming/typewriter.
 func scroll_output_to_bottom_if_following() -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.scroll_output_to_bottom_if_following()
 
 
 func _on_chat_scroll_value_changed(_value: float) -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.on_chat_scroll_value_changed()
 
 
 func _deferred_smooth_scroll_chat_to_bottom() -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	await _chat_ux.deferred_smooth_scroll_chat_to_bottom()
 
 
 ## Called deferred after an "ask feedback" panel is added to the chat. Unrolls the panel and staggers option buttons; then scrolls to show the panel.
 func _animate_ask_panel_in(panel: Control) -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.animate_ask_panel_in(panel)
 
 
 func should_typewriter_assistant_at_index(idx: int) -> bool:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	return _chat_ux.should_typewriter_assistant_at_index(idx)
 
 
 func get_typewriter_reasoning_slice(reasoning: String) -> String:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	return _chat_ux.get_typewriter_reasoning_slice(reasoning)
 
 
 func get_typewriter_plain_slice(full_text: String, reasoning_length: int = 0) -> String:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	return _chat_ux.get_typewriter_plain_slice(full_text, reasoning_length)
 
 
 func _on_typewriter_timer_timeout() -> void:
-	if _chat_ux == null:
-		_chat_ux = GodotAIChatUX.new(self)
 	_chat_ux.on_typewriter_timer_timeout()
 
 
@@ -1229,36 +982,6 @@ func _on_chat_tab_rearranged(idx_to: int) -> void:
 
 
 
-func _on_main_tab_changed(tab_index: int) -> void:
-	# Use child name so behavior is correct after user drag-reorders main tabs.
-	var settings_tab_idx: int = -1
-	var changes_tab_idx: int = -1
-	if tab_container:
-		for i in range(tab_container.get_child_count()):
-			var c: Node = tab_container.get_child(i)
-			if c.name == "Settings":
-				settings_tab_idx = i
-			elif c.name == "Changes":
-				changes_tab_idx = i
-		# When leaving Changes tab, clear timeline focus and diff highlights.
-		if changes_tab_idx >= 0 and _last_main_tab == changes_tab_idx and tab_index != changes_tab_idx:
-			_changes_tab.unfocus_timeline_edit()
-		# When leaving Settings tab, persist current UI to config so values are saved.
-		if settings_tab_idx >= 0 and _last_main_tab == settings_tab_idx and tab_index != settings_tab_idx:
-			_settings_tab.save_settings_tab_to_config()
-		_last_main_tab = tab_index
-	if tab_container and tab_index >= 0 and tab_index < tab_container.get_child_count():
-		var child: Node = tab_container.get_child(tab_index)
-		var name_str := child.name if child else ""
-		if name_str == "Settings":
-			_settings_tab.refresh_settings_tab_from_config()
-		elif name_str == "Changes":
-			if _changes_tab:
-				_changes_tab.render_changes_tab()
-			if _history_tab:
-				_history_tab.refresh_usage()
-
-
 func _query_backend_json(endpoint: String, method: int, body: String) -> Variant:
 	return await GodotAIBackendClient.query_json(self, endpoint, method, body)
 
@@ -1267,11 +990,4 @@ func _query_backend_json(endpoint: String, method: int, body: String) -> Variant
 func notify_settings_saved() -> void:
 	if _settings_tab:
 		_settings_tab.apply_settings_from_config()
-
-
-
-
-
-
-
 # Health check extracted to GodotAIHttpRequestHandler.start_health_check()
