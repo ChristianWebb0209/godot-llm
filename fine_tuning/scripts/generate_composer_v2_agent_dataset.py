@@ -34,8 +34,8 @@ sys.path.insert(0, str(REPO_ROOT))
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(REPO_ROOT / "fine_tuning" / ".env")
     load_dotenv(REPO_ROOT / ".env")
+    load_dotenv(REPO_ROOT / "fine_tuning" / ".env", override=True)
 except Exception:
     # It's okay if env vars are already set; dotenv is just a convenience.
     pass

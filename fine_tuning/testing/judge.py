@@ -20,7 +20,10 @@ from .metrics import llm_judge_prompt
 from .report import load_run
 
 # Load rag_service/.env when running tests directly (python -m testing.judge)
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+_repo_root = Path(__file__).resolve().parents[2]
+load_dotenv(_repo_root / ".env")
+load_dotenv(_repo_root / "rag_service" / ".env", override=True)
+load_dotenv(_repo_root / "fine_tuning" / ".env", override=True)
 
 
 def get_rag_and_composer(results: List[Dict[str, Any]], prompt_id: str) -> Optional[tuple]:

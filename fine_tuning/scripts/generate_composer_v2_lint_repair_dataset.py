@@ -47,8 +47,8 @@ GODOT_PLUGIN_SCRIPTS_DIR = REPO_ROOT / "godot_plugin" / "scripts"
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(REPO_ROOT / "fine_tuning" / ".env")
     load_dotenv(REPO_ROOT / ".env")
+    load_dotenv(REPO_ROOT / "fine_tuning" / ".env", override=True)
 except Exception:
     pass
 

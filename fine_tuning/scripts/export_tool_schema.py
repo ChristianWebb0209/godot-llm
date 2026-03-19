@@ -24,8 +24,8 @@ REPO_ROOT = find_repo_root()
 try:
     from dotenv import load_dotenv
 
-    load_dotenv(REPO_ROOT / "fine_tuning" / ".env")
     load_dotenv(REPO_ROOT / ".env")
+    load_dotenv(REPO_ROOT / "fine_tuning" / ".env", override=True)
 except Exception:
     # If python-dotenv isn't installed, we still attempt import; it may work if
     # OPENAI_API_KEY is already set in the environment.

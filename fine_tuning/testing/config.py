@@ -16,11 +16,13 @@ from typing import Optional
 from dotenv import load_dotenv
 
 # Load environment variables for both:
+# - shared repo defaults (./.env)
 # - rag_service backend (rag_service/.env)
 # - local fine-tuning defaults (fine_tuning/.env, optional)
 REPO_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(REPO_ROOT / "rag_service" / ".env")
-load_dotenv(REPO_ROOT / "fine_tuning" / ".env")
+load_dotenv(REPO_ROOT / ".env")
+load_dotenv(REPO_ROOT / "rag_service" / ".env", override=True)
+load_dotenv(REPO_ROOT / "fine_tuning" / ".env", override=True)
 
 # Base URL of the running RAG service (e.g. http://localhost:8000)
 RAG_BASE_URL: str = os.getenv("RAG_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -56,7 +58,18 @@ _composer_base_url_raw = (
     or os.getenv("OPENAI_BASE_URL")
     or ""
 )
-COMPOSER_BASE_URL: Optional[str] = _composer_base_url_raw.rstrip("/") or None
+
+def _normalize_openai_base_url(raw: str) -> Optional[str]:
+    s = (raw or "").strip().rstrip("/")
+    if not s:
+        return None
+    # OpenAI-compatible chat clients expect a /v1 base; normalize when omitted.
+    if not s.endswith("/v1"):
+        s = f"{s}/v1"
+    return s
+
+
+COMPOSER_BASE_URL: Optional[str] = _normalize_openai_base_url(_composer_base_url_raw)
 
 # Endpoints (non-streaming for simpler test collection)
 ENDPOINT_RAG: str = "/query"
