@@ -39,6 +39,19 @@ static func executor_payload_from_tool_call(tc: Dictionary) -> Dictionary:
 	return payload
 
 
+static func _res_path_from_dict(d: Dictionary) -> String:
+	if typeof(d) != TYPE_DICTIONARY:
+		return ""
+	for k in ["path", "file_path", "scene_path", "script_path"]:
+		var v = d.get(k, "")
+		if v == null:
+			continue
+		var s := str(v).strip_edges()
+		if not s.is_empty():
+			return s
+	return ""
+
+
 static func format_tool_calls_summaries(tool_calls: Array, dock: GodotAIDock) -> Array:
 	var out: Array = []
 	for tc in tool_calls:
@@ -157,6 +170,8 @@ func run_editor_actions_async(
 	var collected_lint_after: Array[String] = []
 	var first_failed_lint_path: String = ""
 	var first_failed_lint_output: String = ""
+	var first_failed_tool_path: String = ""
+	var first_failed_tool_output: String = ""
 	var total := tool_calls.size()
 	var skipped := 0
 	if total > _MAX_TOOL_CALLS_PER_RESPONSE:
@@ -179,13 +194,22 @@ func run_editor_actions_async(
 		if action in ["create_file", "write_file", "append_to_file", "apply_patch", "create_script", "delete_file"]:
 			# Only write_file requires non-empty content; create_file may be create-only (then write_file separately).
 			if action == "write_file" and str(out.get("content", "")).strip_edges().length() < 10:
-				results.append("Error: write_file had no/empty content (model did not generate file). Ask again.")
+				var err := "Error: write_file had no/empty content (model did not generate file). Ask again."
+				results.append(err)
+				if first_failed_tool_path.is_empty():
+					first_failed_tool_path = _res_path_from_dict(out)
+					first_failed_tool_output = err
 				continue
 			_dock.set_status("Applying: %s..." % str(out.get("path", action)))
 			var file_result: Dictionary = await _dock.get_tool_executor().execute_async(out)
 			var ok := file_result.get("success", false)
 			var msg := file_result.get("message", "OK") if ok else ("Error: %s" % file_result.get("message", "unknown"))
 			results.append(msg)
+			if not ok and first_failed_tool_path.is_empty():
+				first_failed_tool_path = _res_path_from_dict(out)
+				if first_failed_tool_path.is_empty():
+					first_failed_tool_path = _res_path_from_dict(file_result)
+				first_failed_tool_output = msg
 			var rec2 = file_result.get("edit_record", null)
 			if rec2 != null and rec2 is Dictionary:
 				var rec_dict: Dictionary = rec2
@@ -224,6 +248,11 @@ func run_editor_actions_async(
 			var mod_ok := mod_result.get("success", false)
 			var mod_msg := mod_result.get("message", "OK") if mod_ok else ("Error: %s" % mod_result.get("message", "unknown"))
 			results.append(mod_msg)
+			if not mod_ok and first_failed_tool_path.is_empty():
+				first_failed_tool_path = _res_path_from_dict(out)
+				if first_failed_tool_path.is_empty():
+					first_failed_tool_path = _res_path_from_dict(mod_result)
+				first_failed_tool_output = mod_msg
 			var mod_rec = mod_result.get("edit_record", null)
 			if mod_rec != null and mod_rec is Dictionary:
 				var mr: Dictionary = mod_rec
@@ -276,6 +305,11 @@ func run_editor_actions_async(
 		var res_ok := result.get("success", false)
 		var node_msg := result.get("message", "OK") if res_ok else ("Error: %s" % result.get("message", "unknown"))
 		results.append(node_msg)
+		if not res_ok and first_failed_tool_path.is_empty():
+			first_failed_tool_path = _res_path_from_dict(out)
+			if first_failed_tool_path.is_empty():
+				first_failed_tool_path = _res_path_from_dict(result)
+			first_failed_tool_output = node_msg
 		# So the model sees run output in chat context (write -> run -> observe -> fix)
 		if action in ["run_terminal_command", "run_godot_headless", "run_scene"]:
 			var run_summary := "Ran: %s" % action
@@ -340,8 +374,15 @@ func run_editor_actions_async(
 	else:
 		_dock.set_status("Response received.")
 	# If any edited file still has lint errors, send a follow-up so the model fixes remaining errors (repeats until clean or cap).
-	if not first_failed_lint_path.is_empty():
-		_dock.call_deferred("send_lint_fix_follow_up", first_failed_lint_path, first_failed_lint_output)
+	var follow_up_path := first_failed_lint_path
+	var follow_up_output := first_failed_lint_output
+	# If we don't have lint errors, still trigger a bounded follow-up for tool execution failures
+	# (e.g. write_file empty content, edit/apply failures) so the model can retry the broken action.
+	if follow_up_path.is_empty() and not first_failed_tool_path.is_empty():
+		follow_up_path = first_failed_tool_path
+		follow_up_output = first_failed_tool_output
+	if not follow_up_path.is_empty():
+		_dock.call_deferred("send_lint_fix_follow_up", follow_up_path, follow_up_output)
 	# Clear "Thinking..." / "Using tool: X" so when nothing is happening the activity shows nothing.
 	_dock._activity_state.clear_activity()
 
