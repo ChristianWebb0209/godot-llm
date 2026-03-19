@@ -1,14 +1,15 @@
-fastapi==0.115.0
-uvicorn[standard]==0.30.0
-pydantic==2.8.2
-requests==2.32.3
-PyYAML>=6.0
-beautifulsoup4==4.12.3
-markdownify==0.12.1
+fastapi>=0.115.0,<0.116
+uvicorn[standard]>=0.30.0,<0.31
 
-chromadb
-openai
-python-dotenv
-pydantic-ai[openai]>=1.64.0
-openviking>=0.1.14
+pydantic>=2.7,<3.0
 
+requests>=2.32,<3.0
+PyYAML==6.0.3
+
+# OpenAI-compatible LLM client and env loading
+openai>=1.40,<2.0
+python-dotenv>=1.0,<2.0
+
+# Pydantic AI agent for OpenAI-compatible models
+pydantic-ai[openai]>=1.64,<2.0
+# pip install fastapi uvicorn[standard] requests PyYAML openai python-dotenv pydantic-ai[openai]

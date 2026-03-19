@@ -490,14 +490,14 @@ def get_registered_tools() -> List[ToolDef]:
             name="write_file",
             description=(
                 "Overwrite a file with new content. Creates the file if it does not exist. "
-                "Use after create_file for new files, or when apply_patch is not suitable for large replacements. "
+                "Use ONLY when replacing the entire file content. Do NOT use for partial edits (use apply_patch instead). "
                 "For .gd files: the file already has one 'extends ClassName' at the top; do not add another extends line."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
-                    "content": {"type": "string", "description": "Full file content."},
+                    "path": {"type": "string", "description": "Project path starting with res:// (e.g., res://scripts/player.gd)."},
+                    "content": {"type": "string", "description": "Full file content to write."},
                 },
                 "required": ["path", "content"],
             },
@@ -505,11 +505,11 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="append_to_file",
-            description="Append content to the end of a file. Creates the file if it does not exist. Use for incremental writes.",
+            description="Append content to the end of a file. Creates the file if it does not exist. Use ONLY for incremental writes at the end of a file.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/foo.gd"},
+                    "path": {"type": "string", "description": "Project path starting with res:// (e.g., res://scripts/player.gd)."},
                     "content": {"type": "string", "description": "Content to append to the file."},
                 },
                 "required": ["path", "content"],
@@ -520,13 +520,13 @@ def get_registered_tools() -> List[ToolDef]:
             name="apply_patch",
             description=(
                 "Edit a file by replacing the first occurrence of old_string with new_string, or pass a unified diff. "
-                "Prefer over write_file for edits to existing files (fewer tokens). Use for small, targeted edits in scripts or scenes. "
+                "Use ONLY for small, targeted edits to existing files. Do NOT use for full rewrites (use write_file). "
                 "For .gd files: do not add a second 'extends' line; the script already has one at the top."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path to the file."},
+                    "path": {"type": "string", "description": "Project path starting with res:// (e.g., res://scripts/player.gd)."},
                     "old_string": {"type": "string", "description": "Exact text to find and replace (omit if using diff)."},
                     "new_string": {"type": "string", "description": "Replacement text (omit if using diff)."},
                     "diff": {"type": "string", "description": "Optional unified diff string instead of old_string/new_string."},
@@ -539,18 +539,17 @@ def get_registered_tools() -> List[ToolDef]:
             name="create_script",
             description=(
                 "Create a new GDScript or C# script file with one extends line and initial content. "
-                "Use template (e.g. character_2d, character_3d, control) to fill boilerplate so you only supply initial_content for the unique logic. "
-                "The created file will have exactly one 'extends ClassName' at the top; when later editing with write_file or apply_patch, never add another extends. "
-                "To attach the script to a node, after creating the script call modify_attribute(target_type='node', scene_path=..., node_path=..., attribute='script', value='res://path/to/script.gd')."
+                "Use template (e.g. character_2d) to fill boilerplate so you only supply initial_content for the unique logic. "
+                "The created file will have exactly one 'extends' at the top; never add another. "
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/player.gd"},
-                    "language": {"type": "string", "description": "gdscript or csharp", "default": "gdscript"},
+                    "path": {"type": "string", "description": "Project path starting with res:// (e.g., res://scripts/player.gd)."},
+                    "language": {"type": "string", "description": "gdscript or csharp", "enum": ["gdscript", "csharp"], "default": "gdscript"},
                     "extends_class": {"type": "string", "description": "Base class, e.g. Node, CharacterBody2D (ignored if template is set).", "default": "Node"},
                     "initial_content": {"type": "string", "description": "Optional body content; with template this is the unique logic only.", "default": ""},
-                    "template": {"type": "string", "description": "Optional: character_2d, character_3d, control, area_2d, area_3d, node. Fills boilerplate.", "default": ""},
+                    "template": {"type": "string", "description": "Optional boilerplate template to use.", "enum": ["", "character_2d", "character_3d", "control", "area_2d", "area_3d", "node"], "default": ""},
                 },
                 "required": ["path"],
             },
@@ -562,13 +561,12 @@ def get_registered_tools() -> List[ToolDef]:
                 "Add a new node to a scene. Executes in the Godot editor: opens the scene, adds the node, saves. "
                 "ALWAYS attach to the current scene: omit scene_path (or use 'current'). parent_path defaults to /root. "
                 "Match the scene dimension: in a 2D scene use Node2D, CharacterBody2D, Sprite2D, CollisionShape2D, etc.; "
-                "in a 3D scene use Node3D, CharacterBody3D, MeshInstance3D, etc. Do NOT use 3D types in a 2D scene or vice versa. "
-                "To add custom behavior, create_script then modify_attribute(attribute='script', value='res://path/to/script.gd') on the node."
+                "in a 3D scene use Node3D, CharacterBody3D, MeshInstance3D, etc. Do NOT use 3D types in a 2D scene or vice versa."
             ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "scene_path": {"type": "string", "description": "Optional. Omit or use 'current' to use the current open scene (preferred). Or res://path/to/scene.tscn."},
+                    "scene_path": {"type": "string", "description": "Optional. res:// path to scene, e.g. res://main.tscn (or use 'current' for the open scene)."},
                     "parent_path": {"type": "string", "description": "Node path of parent in scene; default /root (scene root).", "default": "/root"},
                     "node_type": {"type": "string", "description": "Built-in Godot class only: Node, Node2D, Button, Label, CharacterBody2D, Sprite2D, etc."},
                     "node_name": {"type": "string", "description": "Optional name for the new node."},
@@ -588,10 +586,10 @@ def get_registered_tools() -> List[ToolDef]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "target_type": {"type": "string", "description": "Either 'node' or 'import'."},
+                    "target_type": {"type": "string", "enum": ["node", "import"], "description": "Either 'node' or 'import'."},
                     "attribute": {"type": "string", "description": "Property/key name (e.g. position, compress, text)."},
                     "value": {"description": "New value (number, string, bool, or [x,y] for vectors)."},
-                    "scene_path": {"type": "string", "description": "Required if target_type=node. Scene file path, e.g. res://main.tscn"},
+                    "scene_path": {"type": "string", "description": "Required if target_type=node. Scene file path starting with res:// (e.g., res://main.tscn)."},
                     "node_path": {"type": "string", "description": "Required if target_type=node. Path to the node inside the scene, e.g. /root/Sprite"},
                     "path": {"type": "string", "description": "Required if target_type=import. Resource path, e.g. res://icon.svg"},
                 },
@@ -604,14 +602,14 @@ def get_registered_tools() -> List[ToolDef]:
             description=(
                 "Read the full contents of a project file. Use this whenever you need to see the current "
                 "content of a file (e.g. before editing, or when the user asks what's in a file). "
-                "You will receive the file content in the tool result. Path must be under res://, e.g. res://scripts/player.gd."
+                "You will receive the file content in the tool result."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Project path, e.g. res://scripts/foo.gd or res://player.gd. Must start with res:// or be under the project.",
+                        "description": "Project path starting with res:// (e.g., res://scripts/player.gd).",
                     },
                 },
                 "required": ["path"],
@@ -620,11 +618,11 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="delete_file",
-            description="Delete a file from the project (res://...).",
+            description="Delete a file from the project. Do NOT use this unless requested.",
             parameters={
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Project path, e.g. res://scripts/old.gd"},
+                    "path": {"type": "string", "description": "Project path starting with res:// (e.g., res://scripts/old.gd)."},
                 },
                 "required": ["path"],
             },
@@ -766,24 +764,30 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="grep_search",
-            description="Search project files with a regex or exact pattern. Returns file path, line number, and line text for each match. Use for symbol/pattern search.",
+            description=(
+                "Search project files with a regex or exact pattern. Returns file path, line number, and line text for each match. "
+                "Use for symbol/pattern search (e.g. function names, class refs). For simple substring 'which files contain X' use search_files."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regex pattern or literal text to search for."},
+                    "pattern": {"type": "string", "description": "Regex pattern or literal text to search for (or use query as alias)."},
                     "query": {"type": "string", "description": "Alias for pattern."},
                     "root_path": {"type": "string", "description": "Directory to search under.", "default": "res://"},
                     "extensions": {"type": "array", "items": {"type": "string"}, "description": "Filter by extension, e.g. ['.gd','.tscn'].", "default": []},
                     "max_matches": {"type": "integer", "description": "Max matches to return.", "default": 100, "minimum": 1, "maximum": 500},
                     "use_regex": {"type": "boolean", "description": "If true, pattern is a regex; else literal.", "default": True},
                 },
-                "required": [],
+                "required": ["pattern"],
             },
             handler=_tool_grep_search,
         ),
         ToolDef(
             name="fetch_url",
-            description="Fetch the content of a URL via HTTP GET (e.g. docs, API page). Use to look up external documentation.",
+            description=(
+                "Fetch the content of a URL via HTTP GET. Use to look up external documentation (e.g. Godot docs, API pages) "
+                "when the user asks for docs or API info; this replaces searching an internal doc index."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -808,15 +812,18 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="run_godot_headless",
-            description="Run Godot headlessly with a scene or script path. Captures stdout/stderr and exit code. Enables write-run-observe-fix loop.",
+            description=(
+                "Run Godot headlessly with a scene or script path. Captures stdout/stderr and exit code. "
+                "Enables write-run-observe-fix loop. Use scene_path (or script_path as alias) to specify what to run."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "scene_path": {"type": "string", "description": "res:// path to scene or script to run."},
+                    "scene_path": {"type": "string", "description": "res:// path to scene or script to run (or use script_path as alias)."},
                     "script_path": {"type": "string", "description": "Alias for scene_path."},
                     "timeout_seconds": {"type": "integer", "description": "Max time to wait.", "default": 30, "minimum": 1, "maximum": 120},
                 },
-                "required": [],
+                "required": ["scene_path"],
             },
             handler=_tool_run_godot_headless,
         ),
@@ -826,7 +833,7 @@ def get_registered_tools() -> List[ToolDef]:
             parameters={
                 "type": "object",
                 "properties": {
-                    "scene_path": {"type": "string", "description": "res:// path to the scene, e.g. res://main.tscn"},
+                    "scene_path": {"type": "string", "description": "Project path starting with res:// (e.g., res://main.tscn)."},
                     "timeout_seconds": {"type": "integer", "description": "Max time to wait.", "default": 30, "minimum": 1, "maximum": 120},
                 },
                 "required": ["scene_path"],
@@ -846,7 +853,10 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="get_signals",
-            description="List available signals for a node type or script (name, arguments). Use to reason about signal connections.",
+            description=(
+                "List available signals for a node type or script (name, arguments). Use to reason about signal connections. "
+                "Provide at least one of node_type (built-in) or script_path (res:// to script)."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
@@ -886,15 +896,19 @@ def get_registered_tools() -> List[ToolDef]:
         ),
         ToolDef(
             name="search_asset_library",
-            description="Search the Godot Asset Library for addons/plugins by keyword. Returns asset title, author, support level, browse URL.",
+            description=(
+                "Search the Godot Asset Library for addons/plugins by keyword. Returns asset title, author, support level, browse URL. "
+                "Use when the user asks for a plugin or addon for a feature."
+            ),
             parameters={
                 "type": "object",
                 "properties": {
-                    "filter": {"type": "string", "description": "Search keyword."},
+                    "filter": {"type": "string", "description": "Search keyword (or use query as alias)."},
                     "query": {"type": "string", "description": "Alias for filter."},
                     "godot_version": {"type": "string", "description": "Godot version filter.", "default": "4.2"},
                     "max_results": {"type": "integer", "description": "Max assets to return.", "default": 20, "minimum": 1, "maximum": 50},
                 },
+                "required": ["filter"],
             },
             handler=_tool_search_asset_library,
         ),

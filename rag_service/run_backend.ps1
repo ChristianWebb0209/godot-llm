@@ -6,28 +6,58 @@ Param(
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "[run_backend] Starting Godot RAG backend..." -ForegroundColor Cyan
-
-# Move to script directory (rag_service root)
+# Go to script dir (rag_service)
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $scriptDir
 
-Write-Host "[run_backend] Working directory: $scriptDir" -ForegroundColor DarkCyan
+Write-Host "[run_backend] Starting in $scriptDir"
 
-# Activate venv if present
-$venvActivate = Join-Path $scriptDir ".venv\Scripts\Activate.ps1"
-if (Test-Path $venvActivate) {
-  Write-Host "[run_backend] Activating venv at .venv" -ForegroundColor DarkCyan
-  . $venvActivate
-} else {
-  Write-Warning "[run_backend] No venv found at .venv. Backend may fail if dependencies are missing."
+# -----------------------------
+# Load .env (same dir)
+# -----------------------------
+$envFile = Join-Path $scriptDir ".env"
+
+if (!(Test-Path $envFile)) {
+  Write-Error ".env not found in rag_service"
+  exit 1
 }
 
-# Default: no reload so the Godot plugin's streaming connection is not dropped when you save files.
-$reloadArg = if ($Reload) { "--reload" } else { "" }
-if (-not $Reload) {
-  Write-Host "[run_backend] Running without --reload (use -Reload to enable auto-restart on file change)" -ForegroundColor DarkYellow
+Get-Content $envFile | ForEach-Object {
+  # Skip blank lines and comments
+  if ($_ -match "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$") {
+    $key   = $matches[1]
+    $value = $matches[2].Trim().Trim('"').Trim("'")
+    [System.Environment]::SetEnvironmentVariable($key, $value, "Process")
+  }
 }
-Write-Host "[run_backend] Running: python -m uvicorn app.main:app --host $ListenHost --port $ListenPort $reloadArg --log-level warning" -ForegroundColor DarkCyan
-python -m uvicorn app.main:app --host $ListenHost --port $ListenPort $reloadArg --log-level warning
 
+if (-not $env:OPENAI_API_KEY) {
+  Write-Error "OPENAI_API_KEY missing from .env"
+  exit 1
+}
+
+# -----------------------------
+# Use venv python (repo root)
+# -----------------------------
+$python = [System.IO.Path]::GetFullPath("$scriptDir\..\\.venv\Scripts\python.exe")
+
+if (!(Test-Path $python)) {
+  Write-Error ".venv python not found at: $python"
+  exit 1
+}
+
+# -----------------------------
+# Run
+# -----------------------------
+$uvicornArgs = @(
+  "-m", "uvicorn", "app.main:app",
+  "--host", $ListenHost,
+  "--port", $ListenPort,
+  "--log-level", "info"
+)
+
+if ($Reload) {
+  $uvicornArgs += "--reload"
+}
+
+& $python @uvicornArgs

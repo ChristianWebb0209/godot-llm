@@ -9,10 +9,10 @@ Godot-relevant files.
 - Shallow-clones each repo (no timeout); then copies only: .gd, .cs, .gdshader, .tscn, project.godot (optional).
 - Output: output/<ExtendsClass>/repo__path__to__file.gd (one folder per component only; no per-repo folders).
 - Running the script empties the output directory first (no prompt).
-- After scraping, runs analyze_project.py on the scraped repos (unless --no-analyze).
+- After scraping, does not run any vector indexing / project code analysis.
 
 Usage:
-  python fetch_top_godot_repos.py [--output-dir DIR] [--top N] [--include-project] [--no-analyze]
+  python fetch_top_godot_repos.py [--output-dir DIR] [--top N] [--include-project]
   Set GITHUB_TOKEN in env for higher rate limits (optional).
 """
 
@@ -329,18 +329,18 @@ def main() -> int:
     ap.add_argument(
         "--no-analyze",
         action="store_true",
-        help="Do not run analyze_project.py after scraping",
+        help="No-op (vector indexing / analyze_project removed)",
     )
     ap.add_argument(
         "--analyze-importance-threshold",
         type=float,
         default=0.3,
-        help="Importance threshold for analyze_project (default: 0.3)",
+        help="No-op (vector indexing removed)",
     )
     ap.add_argument(
         "--analyze-clean",
         action="store_true",
-        help="Clean code/demos and index before analyzing (removes existing demo output)",
+        help="No-op (vector indexing removed)",
     )
     ap.add_argument(
         "--no-prune",
@@ -372,7 +372,9 @@ def main() -> int:
         print("Dry run: not cloning.")
         return 0
 
-    write_per_repo = not args.no_analyze  # So analyze_project can run on output_dir/_repos
+    # NOTE: analyze_project + Chroma/Supabase indexing have been removed.
+    # We keep the scraped layout only.
+    write_per_repo = False
 
     # Empty output directory first (no prompt).
     if args.output_dir.exists():
@@ -404,26 +406,7 @@ def main() -> int:
         if pruned:
             print(f"Pruned {len(pruned)} non-native folder(s) into Other/: {moved} files moved.")
 
-    # Run analyze_project on component folders (one index per component).
-    if not args.dry_run and not args.no_analyze and total_files > 0:
-        analyze_script = SCRIPT_DIR / "analyze_project.py"
-        if not analyze_script.exists():
-            print("Warning: analyze_project.py not found, skipping analysis.", file=sys.stderr)
-        else:
-            cmd = [
-                sys.executable,
-                str(analyze_script),
-                "--scraped-root",
-                str(args.output_dir.resolve()),
-            ]
-            if args.analyze_clean:
-                cmd.append("--clean")
-            print("Running analyze_project on scraped component folders...")
-            try:
-                subprocess.run(cmd, check=True, cwd=str(analyze_script.parent))
-            except subprocess.CalledProcessError as e:
-                print(f"analyze_project failed (exit code {e.returncode})", file=sys.stderr)
-                return e.returncode
+    # Vector indexing / project code analysis removed.
 
     return 0
 

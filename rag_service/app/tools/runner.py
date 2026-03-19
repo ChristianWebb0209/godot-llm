@@ -120,6 +120,13 @@ def execute_tool(name: str, arguments: Dict[str, Any], deps: GodotQueryDeps) -> 
         }
 
     if name == "project_structure" and project_root_abs:
+        import os
+        if os.getenv("ENABLE_REPO_INDEXING", "false").lower() not in ("1", "true", "yes"):
+            return {
+                "success": False,
+                "error": "Repo indexing tools are disabled in this environment (ENABLE_REPO_INDEXING=0). You cannot list project structure."
+            }
+
         prefix = (args_dict.get("prefix") or "res://").strip() or "res://"
         max_paths = min(1000, max(1, int(args_dict.get("max_paths", 300))))
         max_depth_arg = args_dict.get("max_depth")
@@ -154,6 +161,13 @@ def execute_tool(name: str, arguments: Dict[str, Any], deps: GodotQueryDeps) -> 
         }
 
     if name == "find_references_to" and project_root_abs:
+        import os
+        if os.getenv("ENABLE_REPO_INDEXING", "false").lower() not in ("1", "true", "yes"):
+            return {
+                "success": False,
+                "error": "Repo indexing tools are disabled in this environment (ENABLE_REPO_INDEXING=0). You cannot find references."
+            }
+
         res_path = (args_dict.get("res_path") or "").strip()
         if not res_path:
             return dispatch_tool_call(name, args_dict)

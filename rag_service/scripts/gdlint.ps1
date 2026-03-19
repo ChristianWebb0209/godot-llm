@@ -24,7 +24,7 @@ param(
 )
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RagServiceRoot = Resolve-Path "$ScriptDir\.."
+$RagServiceRoot = (Resolve-Path "$ScriptDir\..").Path
 $RepoRoot = (Get-Item $RagServiceRoot).Parent.FullName
 $PluginRoot = Join-Path $RepoRoot "godot_plugin"
 $GodotBin = Join-Path $RepoRoot "godot\bin\godot.windows.editor.x86_64.exe"
@@ -40,20 +40,8 @@ foreach ($f in $Files) {
     $ResolvedFiles += $fullPath
 }
 
-# If every file is under godot_plugin, run from plugin project for full type checking.
-$AllUnderPlugin = $true
-$RelativePaths = @()
-foreach ($p in $ResolvedFiles) {
-    if ($p.StartsWith($PluginRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        $rel = $p.Substring($PluginRoot.Length).TrimStart('\', '/')
-        $RelativePaths += $rel
-    } else {
-        $AllUnderPlugin = $false
-        break
-    }
-}
-
-$OutFile = Join-Path $RagServiceRoot "gdscript_errors.txt"
+$OurPid = $PID
+$OutFilePid = Join-Path ([System.IO.Path]::GetTempPath()) ("gdscript_errors_" + $OurPid + ".txt")
 
 # Always pass a project path when the plugin project exists so Godot never shows "Couldn't detect..." (ALERT popup).
 $ProjectPath = $null
@@ -62,43 +50,73 @@ if (Test-Path $projectGodot) {
     $ProjectPath = (Resolve-Path $PluginRoot).Path
 }
 
-# When --path is set, Godot prefers paths relative to the project root (e.g. addons/godot_ai_assistant/file.gd).
-$FilesToCheck = @()
+# Convert absolute paths to the form Godot expects for --script:
+# - If project is known and file is under it, use a project-relative path (e.g. addons/foo/bar.gd).
+# - Otherwise, pass the absolute path.
+$ScriptsToCheck = @()
 foreach ($p in $ResolvedFiles) {
     if ($ProjectPath -and $p.StartsWith($ProjectPath, [StringComparison]::OrdinalIgnoreCase)) {
-        $rel = $p.Substring($ProjectPath.Length).TrimStart('\', '/').Replace('\', '/')
-        $FilesToCheck += $rel
+        $ScriptsToCheck += $p.Substring($ProjectPath.Length).TrimStart('\', '/').Replace('\', '/')
     } else {
-        $FilesToCheck += $p
+        $ScriptsToCheck += $p
     }
 }
 
 if ($ProjectPath) {
-    Write-Host "Running Godot headless linter (project: godot_plugin) on:" $FilesToCheck
+    Write-Host "Running Godot script parse check (project: godot_plugin) on:" $ScriptsToCheck
 } else {
-    Write-Host "Running Godot headless linter on:" $FilesToCheck
+    Write-Host "Running Godot script parse check on:" $ScriptsToCheck
 }
 
-Write-Host "RepoRoot:" $RepoRoot
-Write-Host "PluginRoot:" $PluginRoot
-Write-Host "ProjectPath:" $ProjectPath
-Write-Host "GodotBin:" $GodotBin
-
-# Editor + headless: linter runs in editor runtime; --editor avoids startup ambiguity / popup.
-$godotArgs = @("--headless", "--editor")
-if ($ProjectPath) {
-    $godotArgs += @("--path", $ProjectPath)
+# Godot writes to the console in a way PowerShell can't reliably capture into variables,
+# so we redirect directly to the output file via cmd.exe.
+try {
+    Set-Content -Path $OutFilePid -Value "" -Encoding utf8 -Force
+} catch {
+    Write-Host "gdlint: failed to clear output file:" $_
 }
-$godotArgs += @("--check-only") + $FilesToCheck
 
-$output = & $GodotBin $godotArgs 2>&1
-$exitCode = if ($LASTEXITCODE -ne $null) { $LASTEXITCODE } else { 0 }
+foreach ($scriptPath in $ScriptsToCheck) {
+    Add-Content -Path $OutFilePid -Value ("=== " + $scriptPath + " ===") -Encoding utf8
 
-$output | Set-Content -Path $OutFile
-$output | Write-Host
-Write-Host ""
-Write-Host "gdlint: results written to gdscript_errors.txt"
-if ($exitCode -ne 0) {
-    Write-Host "gdlint: Godot reported errors (exit code $exitCode)"
-    exit $exitCode
+    $cmdParts = @(
+        "`"$GodotBin`"",
+        "--headless",
+        "--editor"
+    )
+    if ($ProjectPath) {
+        $cmdParts += @("--path", "`"$ProjectPath`"")
+    }
+    $cmdParts += @("--script", "`"$scriptPath`"", "--check-only")
+
+    $cmdLine = ($cmdParts -join " ") + " >> `"$OutFilePid`" 2>&1"
+    & cmd /c $cmdLine | Out-Null
+    Add-Content -Path $OutFilePid -Value "" -Encoding utf8
 }
+
+if (-not (Test-Path $OutFilePid)) {
+    Write-Host "gdlint: warning: output file was not created:" $OutFilePid
+    exit 1
+}
+
+$raw = ""
+try {
+    $raw = Get-Content -Path $OutFilePid -Raw -ErrorAction SilentlyContinue
+} catch {
+    $raw = ""
+}
+
+# Output the Godot output to console so VS Code problemMatcher can parse it
+Write-Output $raw
+
+# Clean up temporary output file
+try {
+    Remove-Item -Path $OutFilePid -Force -ErrorAction SilentlyContinue
+} catch {}
+
+if ($raw -match "SCRIPT ERROR:" -or $raw -match "Parse Error:" -or $raw -match "Failed to load script") {
+    Write-Host "gdlint: issues found"
+    exit 1
+}
+
+Write-Host "gdlint: ok"

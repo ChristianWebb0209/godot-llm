@@ -7,16 +7,17 @@ This file is the **single source of truth** for how the **Godot LLM Assistant** 
 ## Quick reference for future agents
 
 - **Change a tool (add/rename/parameters)**  
-  Tool loop and execution are implemented via **Pydantic AI**. Edit `rag_service/app/services/tools.py` for `ToolDef` and handler; add a matching wrapper in `rag_service/app/services/godot_agent.py` and implement backend path (when `project_root_abs` is set) in `rag_service/app/services/tool_runner.py`. Plugin: `godot_plugin/addons/godot_ai_assistant/tools/editor_tool_executor.gd` dispatches execute_on_client actions to `tools/file.gd`, `tools/fs.gd`, etc.
+  Tool loop and execution are implemented via **Pydantic AI**. Edit `rag_service/app/tools/definitions.py` for tool definitions and handlers; ensure the agent wiring is correct in `rag_service/app/tools/agent.py` and that server-side execution (when `project_root_abs` is set) is implemented in `rag_service/app/tools/runner.py`. Plugin: `godot_plugin/addons/godot_ai_assistant/tools/editor_tool_executor.gd` dispatches execute_on_client actions to `tools/file.gd`, `tools/fs.gd`, etc.
 
 - **Change what the LLM sees (context / tools)**  
-  `rag_service/app/main.py`: `_run_query_with_tools` builds RAG + context blocks and user content, then calls the Pydantic AI agent (`godot_agent.run_sync`). Agent instructions and tools live in `rag_service/app/services/godot_agent.py`; tool execution in `tool_runner.execute_tool`. Context block order and budgets: `rag_service/app/services/context/` (context_builder, budget). Plugin sends `context.extra.conversation_history` and `context.extra.chat_id` (for OpenViking session memory; see §3.4).
+  `rag_service/app/main.py`: `_run_query_with_tools` builds RAG + context blocks and user content, then calls the Pydantic AI agent (`godot_agent.run_sync`). Agent instructions and tool registration live in `rag_service/app/tools/agent.py` and `rag_service/app/tools/definitions.py`; tool execution is in `dispatch_tool_call` / `rag_service/app/tools/runner.py`. Context block order and budgets: `rag_service/app/services/context/` (context_builder, budget). Plugin sends `context.extra.conversation_history` and `context.extra.chat_id` (for OpenViking session memory; see §3.4).
 
 - **Change plugin UI (tabs, chat, diff, history)**  
   `godot_plugin/addons/godot_ai_assistant/ai_dock.gd` (logic) and `ai_dock.tscn` (scene). Tab selection uses **child node name** (e.g. `History`, `Settings`), not tab index.
 
 - **Edit History data**  
-  Backend: `rag_service/app/db/` (edit_events, file_changes); DB file `rag_service/data/db/ai_history.db`. Plugin: Edit History tab uses `GET /edit_events/list?limit=500` and `GET /edit_events/{id}`.
+  Plugin-only: Edit History tab uses `GodotAIEditStore` and persists to `user://godot_ai_assistant/edit_history/edits.json`.
+  Backend edit-history endpoints are deprecated (see `/edit_events/*` routes).
 
 - **Plugin not loading**  
   If the dock does not appear: check Godot Output for parse/script errors. Common causes: wrong node path in @onready (use `get_node_or_null()` in `_ready()` for optional nodes), or GDScript/Godot 4 API misuse (see §11). Open the project from the folder that contains `project.godot` (e.g. `godot_plugin`), not the parent repo root.
@@ -52,7 +53,7 @@ This file is the **single source of truth** for how the **Godot LLM Assistant** 
 - `rag_service/` – Python 3.11 backend + tooling and data.
 - `godot_plugin/addons/godot_ai_assistant/` – Godot editor plugin.
 - `godot_knowledge_base/` – Scraped docs + curated code.
-- `rag_service/data/chroma_db/` – Local ChromaDB store (vector DB for docs + code).
+- (Removed) ChromaDB vector store used to live at `rag_service/data/chroma_db/` for runtime retrieval.
 
 ### 2.1 Plugin folder layout (`godot_plugin/addons/godot_ai_assistant/`)
 
@@ -72,12 +73,11 @@ Important subpaths:
   - `rag_service/run_tools.ps1` – unified launcher for tools.
 - Docs pipeline:
   - `rag_service/tools/docs-parser/scrape_godot_docs.py` – crawler → markdown.
-  - `rag_service/tools/docs-parser/index_docs.py` – index markdown → Chroma `docs`.
+- `rag_service/tools/docs-parser/index_docs.py` – optional indexing step (not used for runtime retrieval in this repo).
   - `godot_knowledge_base/docs/4.6/**` – scraped docs.
 - Project pipeline:
-  - `rag_service/scripts/analyze_project.py` – analyze/import projects.
+  - (Removed) `rag_service/scripts/analyze_project.py` – project code analysis/indexing removed from this repo.
   - `godot_knowledge_base/code/demos/<slug>/` – selected important scripts/shaders.
-  - Chroma `project_code` collection – indexed project code.
 - Repo indexing (structural graph):
   - `rag_service/app/services/repo_indexing.py` – SQLite-backed file/edge index per project.
   - `rag_service/data/db/repo_index_<repo_id>.db` – per-project DB (avoids lock contention).
@@ -137,21 +137,13 @@ Important subpaths:
   - Returns an `OpenAI` client if `OPENAI_API_KEY` is set.
   - Returns `None` otherwise (backend falls back to a plain-text explanation).
 
-### 3.3 ChromaDB Setup (Shared with Tools)
+### 3.3 ChromaDB Setup (removed)
 
-- Collections:
-  - `docs` – scraped markdown docs.
-  - `project_code` – important scripts/shaders from projects.
-- Embeddings:
-  - If `OPENAI_API_KEY` is set:
-    - Use `OpenAIEmbeddingFunction` with `OPENAI_EMBED_MODEL` for both collections.
-  - If not:
-    - Fall back to Chroma’s defaults (not recommended for production).
-
-> Implementation detail: if a collection already exists with a different
-> embedding configuration, the backend reuses the existing collection and logs
-> a warning, instead of crashing. To fully change embeddings, delete
-> `rag_service/data/chroma_db/` and re-run the indexers (see §4.3).
+ChromaDB vector indexing and Chroma-backed retrieval were removed from this repo.
+Runtime retrieval relies on:
+- active file context + plugin-provided one-hop related files,
+- optional current scene scripts,
+- optional OpenViking session memory.
 
 ### 3.4 Retrieval Strategy (legacy; disabled)
 
@@ -165,7 +157,7 @@ That retrieval is **disabled** in the current `/query` “tools loop” path; th
 - The user’s **active file**, **related files**, and **current scene scripts** (server-read from the project when `project_root_abs` is provided)
 - Optional **conversation_history** and **OpenViking session memory**
 
-### 3.6 Tools & Orchestration (`rag_service/app/services/tools.py`)
+### 3.6 Tools & Orchestration (`rag_service/app/tools/definitions.py`)
 
 - Tools are `ToolDef` objects (name, description, parameters, handler). `get_openai_tools_payload()` builds the OpenAI `tools=[...]` payload. `_run_query_with_tools` runs RAG, then up to **max_tool_rounds** (default 5) of LLM + tool execution; tool results are fed back so the model can “explore then act” in one request.
 - **Server-side when `project_root_abs` is set** (LLM sees real results in the same request):
@@ -189,9 +181,12 @@ That retrieval is **disabled** in the current `/query` “tools loop” path; th
 
 ---
 
-## 4. ChromaDB Collections & Indexing
+## 4. ChromaDB Collections & Indexing (removed)
 
-### 4.1 Docs Collection (`docs`)
+ChromaDB indexing into `docs` / `project_code` collections was removed from this repo.
+At runtime, the backend relies on plugin-provided active/related context (and optional OpenViking memory).
+
+### 4.1 Docs Collection (`docs`) (removed)
 
 - Created and managed by `index_docs.py`.
 - Always **rebuilt from scratch** on each `index_docs` run:
@@ -206,7 +201,7 @@ That retrieval is **disabled** in the current `/query` “tools loop” path; th
 
 ### 4.2 Project Code Collection (`project_code`)
 
-- Created/updated by `analyze_project.py` (`index_in_chromadb`).
+- Created/updated by `analyze_project.py` (`index_in_chromadb`) (removed).
 - On each ingest:
   - Loads `.env` to configure embeddings.
   - Reuses or creates `project_code` collection:
@@ -233,30 +228,16 @@ That retrieval is **disabled** in the current `/query` “tools loop” path; th
   - Project code is still valuable for idioms, patterns, and end-to-end examples, but must not
     override the official documentation.
 
-### 4.3 Clean Reset Procedure (Important)
+### 4.3 Clean Reset Procedure (deprecated)
 
-If you ever change embedding config or see conflicts like “embedding function conflict: new: openai vs persisted: default”:
-
-1. Stop backend.
-2. Delete `rag_service/data/chroma_db/`:
-
-   ```powershell
-   cd C:\Github\godot-llm\rag_service
-   Remove-Item -Recurse -Force .\data\chroma_db
-   ```
-
-3. Re-run:
-   - `run_tools.ps1 index_docs` → rebuild `docs`.
-   - `run_tools.ps1 analyze_project ...` → rebuild `project_code`.
-
-Both backend and tools now share identical embedding configuration logic via `.env`.
+Vector indexing / ChromaDB collections were removed from this repo, so there is no vector reset procedure here.
 
 ---
 
 ## 5. Docs & project pipelines (reference)
 
-- **Docs**: `scrape_godot_docs.py` (BFS crawl → markdown under `godot_knowledge_base/docs/4.6`); `index_docs.py` rebuilds Chroma `docs` collection from that tree. Use `run_tools.ps1 scrape_docs` / `index_docs`.
-- **Project code**: `analyze_project.py` parses project.godot, .tscn (root type, scripts, instances), .gd/.cs/.gdshader (extends, LOC, tags). Scripts with `importance >= threshold` (default 0.3) are copied to `godot_knowledge_base/code/demos/<slug>/` and indexed into Chroma `project_code`. CLI: `run_tools.ps1 analyze_project --source-root "C:\path\to\Project"` or `--projects-root` for batch.
+- **Docs**: `scrape_godot_docs.py` (BFS crawl → markdown under `godot_knowledge_base/docs/4.6`). Vector indexing into Chroma is no longer used for runtime retrieval in this repo.
+- **Project code**: project code analysis/indexing via `analyze_project.py` was removed (see note in §4).
 
 ---
 
@@ -272,7 +253,8 @@ Both backend and tools now share identical embedding configuration logic via `.e
   - **Main tabs** (Chat, Edit History, Settings, Pending & Timeline): `TabContainer.get_tab_bar().drag_to_rearrange_enabled = true`. Tab-change logic uses the **selected child’s node name** (e.g. `Settings`, `History`), not fixed indices, so it still works after the user reorders tabs.
   - **Chat tabs** (Chat 1, Chat 2, …): `TabBar.drag_to_rearrange_enabled = true`; `active_tab_rearranged` is connected so `_chats` is reordered to match the new tab order.
 - **Pending & Timeline**: Diff preview (OldText/NewText) shows when a file item is selected; safe node resolution and minimum size so the panel stays visible.
-- **Edit History**: Flat ItemList + detail panel (timestamp, summary, files changed, prompt, lint). Data from `GET /edit_events/list?limit=500`; `GET /edit_events/{id}` returns full event with old/new content per file.
+- **Edit History**: Flat ItemList + detail panel (timestamp, summary, files changed, prompt, lint).
+  Data comes from local `GodotAIEditStore` persisted to `user://godot_ai_assistant/edit_history/edits.json` (undo/revert is local).
 - **Plugin load**: If the dock scene fails to load, a fallback panel with an error message is shown; check Output for errors.
 - The plugin passes `EditorInterface` into the dock via `set_editor_interface()` so the executor can open scenes, add nodes, and save.
 
@@ -290,10 +272,10 @@ Both backend and tools now share identical embedding configuration logic via `.e
 - **Indicators**: File tree and script tabs show 🟢 created, 🟡 modified, ⚫ deleted, 🔴 failed (lint), by matching paths from `file_status`. Scene tree shows 🧩 created (component) and 🟡 modified for nodes in `node_status` for the open scene. See §6.5 for how decorations are applied and styling constants.
 - **Timeline & Revert**: “Pending & Timeline” tab lists all applied changes (file + node) with action-type icons. Selecting a **file** event shows old vs new in the diff panel. **Revert selected** writes `old_content` back to the file and clears that path from `file_status` so the indicator goes away.
 
-### 7.2 Edit history: backend SQLite + plugin local store
+### 7.2 Edit history: plugin-only local store
 
-- **Backend** (`rag_service/ai_history.db`): `POST /edit_events/create` (plugin posts after tool runs), `GET /edit_events/list`, `POST /edit_events/undo/{id}` (returns tool calls to restore content). The **Edit History** tab in the plugin shows this server-backed list and can trigger undo via the backend.
-- **Plugin local store** (`user://godot_ai_assistant_edits.json`): Timeline of applied file/node changes for the **Pending & Timeline** tab, file/node status for 🟢🟡🔴 indicators, and **Revert** (writes `old_content` back without calling the backend). So: server history = list/undo from API; local store = per-session timeline + revert.
+- **Plugin local store** (`user://godot_ai_assistant/edit_history/edits.json`): Timeline of applied file/node changes for the **Pending & Timeline** tab, file/node status for 🟢🟡🔴 indicators, and **Revert** (writes `old_content` back to the file).
+- Backend `/edit_events/*` routes are deprecated and no longer used by the plugin.
 
 ### 6.3 Dock layout
 
@@ -351,18 +333,16 @@ Both backend and tools now share identical embedding configuration logic via `.e
 ## 9. Repair memory (lint fix storage)
 
 - **Purpose**: Store lint failure → successful fix (diff + optional explanation) so the same or similar errors get “past fix” context and the LLM produces more consistent Godot 4.x GDScript.
-- **Storage**: Single SQLite DB `rag_service/data/db/repair_memory.db` with `lint_sessions`, `lint_errors`, `lint_fixes`. Not training the model—improving the **retrieval** layer.
-- **Normalization**: Raw lint output is normalized (strip paths, line/column, quoted identifiers) and hashed with `engine_version` to form `error_hash` so repeated identical errors collapse.
-- **Endpoints**:
-  - `POST /lint_memory/record_fix`: body `project_root_abs`, `file_path`, `engine_version`, `raw_lint_output`, `old_content`, `new_content`, optional `prompt`. Stores session + error + fix (unified diff). If OpenAI is configured, requests a short “explanation” of the fix for the record.
-  - `GET /lint_memory/search?engine_version=...&raw_lint_output=...&limit=...`: returns matching past fixes (same `error_hash`) for in-context injection.
-- **Plugin**: When auto-lint fix runs and lint later passes, the dock posts the fix (first failure output + before/after content) to `record_fix`. When asking the backend to fix lint, it sends `context.extra.lint_output` so the context builder can attach “Past lint fixes” when available.
+- **Storage**: Client-owned JSON persisted to `user://godot_ai_assistant/lint_memory/lint_memory.json` (`GodotAILintMemoryStore`). Not training the model—improving the **retrieval** layer.
+- **Normalization**: Raw lint output is normalized (strip paths, line/column, quoted identifiers) and hashed with `engine_version` to form an error key so repeated identical errors collapse.
+- **Endpoints**: `POST /lint_memory/record_fix` and `GET /lint_memory/search` are deprecated; the plugin no longer uses them.
+- **Plugin**: When auto-lint fix succeeds, the dock records the fix locally, and injects `context.extra.lint_repair_memory` into requests so the backend can include past fixes without querying SQLite.
 
 ---
 
 ## 11. Run & test
 
-- **Backend**: `rag_service/run_backend.ps1` (or `uvicorn app.main:app --reload`). **Tools pipeline**: `run_tools.ps1` for `scrape_docs`, `index_docs`, `analyze_project`, `chroma_status`, `rag_tests`, `chroma_visualize`. Quick check: `GET http://127.0.0.1:8000/health` → `{ "status": "ok" }`.
+- **Backend**: `rag_service/run_backend.ps1` (or `uvicorn app.main:app --reload`). **Tools pipeline**: `run_tools.ps1` for optional doc scraping and `rag_tests`. Quick check: `GET http://127.0.0.1:8000/health` → `{ "status": "ok" }`.
 
 ---
 

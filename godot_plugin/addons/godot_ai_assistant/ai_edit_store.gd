@@ -10,7 +10,8 @@ class_name GodotAIEditStore
 ## This file is data/persistence + shared constants; it does not touch the editor UI.
 ## Editor UI application lives in editor/editor_decorator.gd only.
 
-const STORE_PATH := "user://godot_ai_assistant_edits.json"
+const STORE_PATH := "user://godot_ai_assistant/edit_history/edits.json"
+const LEGACY_STORE_PATH := "user://godot_ai_assistant_edits.json"
 
 ## --- Marker constants (used by editor_decorator to label script tabs, FileSystem, Scene tree) ---
 const FILE_MARKER_CREATED := "[+] "   ## New file / just created
@@ -79,9 +80,12 @@ var pending: Array = []
 
 
 func load_from_disk() -> void:
-	if not FileAccess.file_exists(STORE_PATH):
+	var path_to_use := STORE_PATH
+	if not FileAccess.file_exists(path_to_use) and FileAccess.file_exists(LEGACY_STORE_PATH):
+		path_to_use = LEGACY_STORE_PATH
+	if not FileAccess.file_exists(path_to_use):
 		return
-	var f := FileAccess.open(STORE_PATH, FileAccess.READ)
+	var f := FileAccess.open(path_to_use, FileAccess.READ)
 	if f == null:
 		return
 	var txt := f.get_as_text()
@@ -103,6 +107,11 @@ func load_from_disk() -> void:
 	events = d.get("events", []) if d.get("events", []) is Array else []
 	pending = d.get("pending", []) if d.get("pending", []) is Array else []
 
+	# If we loaded from the legacy location, rewrite to the new layout so future saves
+	# use the plan's `user://godot_ai_assistant/edit_history/` path.
+	if path_to_use != STORE_PATH:
+		save_to_disk()
+
 func save_to_disk() -> void:
 	var d := {
 		"file_status": file_status,
@@ -110,6 +119,9 @@ func save_to_disk() -> void:
 		"events": events,
 		"pending": pending,
 	}
+	var dir_path := STORE_PATH.get_base_dir()
+	if not dir_path.is_empty():
+		DirAccess.make_dir_recursive_absolute(dir_path)
 	var f := FileAccess.open(STORE_PATH, FileAccess.WRITE)
 	if f == null:
 		return

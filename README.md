@@ -21,8 +21,8 @@ At a high level:
 
 - The **Godot plugin** collects editor context (current script/scene, engine version, pinned files/nodes, lint output, etc.) and sends a `/query` to the backend.
 - The **RAG service**:
-  - Pulls in relevant docs + example code from a local ChromaDB.
-  - Builds a **budgeted context** around your project (active file, related files, scene graph, recent edits, lint, etc.).
+  - Builds a **budgeted context** around your project (active file, plugin-provided related files, scene graph, lint, etc.).
+  - Vector indexing into ChromaDB / pgvector has been removed in this repo; runtime retrieval relies on the plugin + lightweight server heuristics.
   - Calls an LLM with a **tool schema** (file/scene/node/edit tools, search tools, lint, repo index, etc.).
   - Streams back:
     - The assistant’s answer text.
@@ -45,7 +45,7 @@ This folder is about training a **small‑to‑medium coding model** that’s tu
     - Export the backend **tool schema** (`scripts/export_tool_schema.py`).
     - Prepare tool‑use and code‑style datasets (`fine_tuning/data/**`).
     - Fine‑tune a base model (e.g. Gemma‑style / QLoRA) in Colab (`colab/train_lora_gemma_tools.py`).
-  - The fine‑tuned model is expected to **emit the same tool names and argument shapes** as `rag_service/app/services/tools.py`.
+  - The fine‑tuned model is expected to **emit the same tool names and argument shapes** as `rag_service/app/tools/definitions.py`.
 
 - **You don’t need this to use the plugin.** It’s here so we can eventually swap in a Godot‑aware model without changing the rest of the stack.
 
@@ -95,26 +95,20 @@ Then in Godot:
 
 ### 2.3 `rag_service/` – RAG backend + tools for Godot
 
-The `rag_service` folder is a **FastAPI** backend plus helper scripts for scraping docs, analyzing projects, and indexing into ChromaDB and SQLite.
+The `rag_service` folder is a **FastAPI** backend plus helper scripts.
 
 - **What it does**
   - Serves:
     - `GET /health` – simple health check.
     - `POST /query`, `/query_stream`, `/query_stream_with_tools` – main RAG + tools endpoints used by the plugin.
-    - Lint endpoints and edit‑history endpoints used by the plugin’s History and lint flows.
-  - Uses **ChromaDB** at `rag_service/data/chroma_db/` for:
-    - A `docs` collection (scraped Godot docs).
-    - A `project_code` collection (curated example projects).
-  - Uses SQLite DBs under `rag_service/data/db/` for:
-    - `ai_history.db` – edit history and LLM usage.
-    - `repair_memory.db` – lint “repair memory” (stores normalized lint errors + successful fixes so we can suggest better fixes next time).
-    - `repo_index*.db` – per‑project structural repo indexes (files, edges, references).
-  - Builds a **context window** around your active file and scene (plus past edits, lint, etc.) and feeds that to the LLM along with the tool schema.
+    - Lint endpoints used by the plugin’s lint flows (edit history is local-only in the plugin).
+  - Builds a **context window** around your active file and scene and feeds it to the LLM along with the tool schema.
+    - Runtime state (usage, edit history, lint repair memory, repo proximity context) is owned by the Godot plugin and persisted locally under `user://`.
   - Executes some tools server‑side (file reads/search/index queries) so the model sees **real results** in a single round trip.
 
 - **Important note about training/indexing data**
   - Some of the underlying **training/index data** (for example, certain scraped projects or docs in `godot_knowledge_base/`) is **not included in this repo** and will remain private because the original sources did not explicitly consent to redistribution.
-  - The code here is designed so you can plug in your own corpora and re‑index Chroma/SQLite locally.
+  - The code here is designed so you can plug in your own corpora and re-index locally if you choose to.
 
 - **Very short “run it” guide (Windows/PowerShell)**
 
@@ -137,9 +131,9 @@ Once the backend is up, point the Godot plugin at `http://127.0.0.1:8000` in the
 ## 3. What’s actively being worked on
 
 - **Backend (`rag_service`)**
-  - Keeping all runtime data in `rag_service/data/` (Chroma + all SQLite DBs).
-  - Improving context assembly around the current script/scene and repo index.
-  - Making tool usage more robust, especially around lint + repair memory and structural queries.
+  - Stateless request handling (no runtime SQLite/Chroma state writes).
+  - Improving context assembly around the current script/scene and structural proximity.
+  - Making tool usage more robust, especially around lint output and structural queries.
 
 - **Godot plugin**
   - Polishing the UI (chat tabs, context viewer, timeline).

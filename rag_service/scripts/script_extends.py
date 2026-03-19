@@ -1,6 +1,6 @@
 """
 Shared logic to infer the Godot "component" (extends class) from script content.
-Used by fetch_top_godot_repos (by-component folder layout) and analyze_project (index metadata).
+Used by fetch_top_godot_repos (by-component folder layout).
 """
 from pathlib import Path
 import re

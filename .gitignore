@@ -38,7 +38,7 @@ checkpoints/
 merged/
 
 # RAG test run outputs
-rag_service/testing/results/
+fine_tuning/testing/results/
 
 # Fine-tuning data backups (from filter_removed_tools.py)
 fine_tuning/**/*.bak
