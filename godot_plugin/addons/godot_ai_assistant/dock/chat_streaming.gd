@@ -216,6 +216,31 @@ func parse_think_and_answer(raw: String) -> Dictionary:
 	return { "reasoning": reasoning.strip_edges(), "answer": answer }
 
 
+static func extract_tool_calls_and_usage(full_text: String) -> Dictionary:
+	# Contract helper for tests and robust marker parsing.
+	var normalized_full_text := full_text.replace("\r\n", "\n").replace("\r", "\n")
+	const TOOL_CALLS_MARKER := "\n__TOOL_CALLS__\n"
+	const USAGE_MARKER := "\n__USAGE__\n"
+
+	var marker_pos := normalized_full_text.find(TOOL_CALLS_MARKER)
+	if marker_pos < 0:
+		return { "tool_calls_json": "", "usage_json": "" }
+
+	var tail := normalized_full_text.substr(marker_pos + TOOL_CALLS_MARKER.length())
+	var usage_pos := tail.find(USAGE_MARKER)
+
+	var tool_calls_json := tail.strip_edges()
+	var usage_json := ""
+	if usage_pos >= 0:
+		tool_calls_json = tail.substr(0, usage_pos).strip_edges()
+		usage_json = tail.substr(usage_pos + USAGE_MARKER.length()).strip_edges()
+
+	return {
+		"tool_calls_json": tool_calls_json,
+		"usage_json": usage_json,
+	}
+
+
 func on_stream_chunk(delta: String) -> void:
 	if _dock._stream_start_generation != _dock._stream_generation:
 		return
@@ -224,8 +249,9 @@ func on_stream_chunk(delta: String) -> void:
 	var is_first_chunk: bool = _dock._streamed_markdown.is_empty()
 	if is_first_chunk:
 		_dock._activity_state.push_activity("Streaming response...")
-	_dock._streamed_markdown += delta
-	_dock.ensure_chat_has_messages_internal()
+		_dock.ensure_chat_has_messages_internal()
+	# Keep accumulating streamed content so parse/render state stays correct.
+	_dock._streamed_markdown += _normalize_newlines(delta)
 	var messages: Array = _dock.get_chats()[_dock._streaming_chat_index]["messages"]
 	if (
 		_dock._stream_message_index >= 0
@@ -262,7 +288,8 @@ func on_stream_done(full_text: String, error_message: String = "") -> void:
 		_dock._chat_ux.update_ask_button_state()
 		_dock._clear_activity()
 		return
-	_dock._streamed_markdown = full_text
+	var normalized_full_text := _normalize_newlines(full_text)
+	_dock._streamed_markdown = normalized_full_text
 	const TOOL_CALLS_MARKER := "\n__TOOL_CALLS__\n"
 	const USAGE_MARKER := "\n__USAGE__\n"
 	var sci: int = _dock._streaming_chat_index if _dock._streaming_chat_index >= 0 else _dock.get_current_chat()
@@ -285,19 +312,16 @@ func on_stream_done(full_text: String, error_message: String = "") -> void:
 		if sci == _dock.get_current_chat():
 			_dock._chat_renderer.render_chat_log()
 	if marker_pos >= 0:
-		var tail := full_text.substr(full_text.find(TOOL_CALLS_MARKER) + TOOL_CALLS_MARKER.length())
-		var usage_pos := tail.find(USAGE_MARKER)
-		var tool_calls_json := tail.strip_edges()
-		var usage_json := ""
-		if usage_pos >= 0:
-			tool_calls_json = tail.substr(0, usage_pos).strip_edges()
-			usage_json = tail.substr(usage_pos + USAGE_MARKER.length()).strip_edges()
+		var extracted := extract_tool_calls_and_usage(normalized_full_text)
+		var tool_calls_payload: String = extracted.get("tool_calls_json", "")
+		var usage_json: String = extracted.get("usage_json", "")
 		if sci >= 0 and sci < _dock.get_chats().size():
 			var messages2: Array = _dock.get_chats()[sci]["messages"]
-			if not tool_calls_json.is_empty():
-				var json := JSON.new()
-				if json.parse(tool_calls_json) == OK and json.data is Array:
-					var tool_arr: Array = json.data
+			if not tool_calls_payload.is_empty():
+				var parsed_tool_calls := _parse_tool_calls_payload(tool_calls_payload)
+				var tool_arr: Array = parsed_tool_calls.get("tool_arr", []) as Array
+				var tool_parse_error: String = parsed_tool_calls.get("error", "") as String
+				if tool_parse_error.is_empty() and tool_arr.size() > 0:
 					var summaries: Array = _dock._format_tool_calls_summaries(tool_arr)
 					if (
 						_dock._stream_message_index >= 0
@@ -306,13 +330,24 @@ func on_stream_done(full_text: String, error_message: String = "") -> void:
 					):
 						messages2[_dock._stream_message_index]["tool_calls_summary"] = summaries
 					_dock._update_tool_calls_ui()
-					_dock._run_editor_actions_then_lint_follow_up.call_deferred(
+					# Dispatch tool calls via the dock so tool execution + lint follow-ups work.
+					_dock.run_editor_actions_async.call_deferred(
 						tool_arr,
 						false,
 						"tool_action",
 						_dock._last_tool_prompt,
 						"",
 						""
+					)
+				else:
+					var preview := tool_calls_payload
+					if preview.length() > 500:
+						preview = preview.substr(0, 497) + "..."
+					_dock.set_status("Tool calls marker found, but tool_calls JSON could not be parsed.")
+					_dock.append_error_to_chat(
+						"**Tool calls parse error**" +
+						("" if tool_parse_error.is_empty() else (" " + tool_parse_error)) +
+						"\n\nRaw (preview):\n```\n" + preview + "\n```"
 					)
 			if sci == _dock.get_current_chat():
 				_dock._chat_renderer.render_chat_log()
@@ -334,4 +369,63 @@ func on_stream_done(full_text: String, error_message: String = "") -> void:
 	_dock._activity_state.clear_activity()
 	if _dock._typewriter_timer != null:
 		_dock._typewriter_timer.start()
+
+
+func _normalize_newlines(s: String) -> String:
+	# Make marker matching consistent across backends/platforms that emit \r\n.
+	return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+static func _parse_tool_calls_payload(payload: String) -> Dictionary:
+	# Supports both:
+	# - marker-based JSON array (current contract)
+	# - XML <tool_call>{...json...}</tool_call> blocks (newer backend variants)
+	var normalized := payload.replace("\r\n", "\n").replace("\r", "\n").strip_edges()
+	if normalized.is_empty():
+		return { "tool_arr": [], "error": "" }
+
+	var json := JSON.new()
+	if json.parse(normalized) == OK and json.data is Array:
+		return { "tool_arr": json.data, "error": "" }
+
+	# If it's not a JSON array, try parsing the tool_call XML blocks.
+	var tool_arr := _parse_tool_calls_from_xml(normalized)
+	if tool_arr.size() > 0:
+		return { "tool_arr": tool_arr, "error": "" }
+
+	# Best-effort error detail.
+	var err_detail := "Expected JSON array or <tool_call> XML blocks."
+	return { "tool_arr": [], "error": err_detail }
+
+
+static func _parse_tool_calls_from_xml(xml_text: String) -> Array:
+	var out: Array = []
+	if xml_text.find("<tool_call") < 0:
+		return out
+
+	var re := RegEx.new()
+	# (?s) makes '.' match newlines.
+	if re.compile("(?s)<tool_call>\\s*(.*?)\\s*</tool_call>") != OK:
+		return out
+
+	var matches: Array = re.search_all(xml_text)
+	for m in matches:
+		if m == null:
+			continue
+		var inner := str(m.get_string(1)).strip_edges()
+		if inner.is_empty():
+			continue
+		var j := JSON.new()
+		if j.parse(inner) != OK:
+			continue
+		if typeof(j.data) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = j.data
+		var name := str(d.get("name", d.get("tool_name", "")))
+		if name.is_empty():
+			continue
+		var args_val := d.get("arguments", d.get("args", {}))
+		var args: Dictionary = args_val if typeof(args_val) == TYPE_DICTIONARY else {}
+		out.append({"tool_name": name, "arguments": args})
+	return out
 
