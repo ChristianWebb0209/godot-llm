@@ -95,6 +95,8 @@ def _migrate_edit_events_columns(conn: sqlite3.Connection) -> None:
 
 def record_usage(model: str, prompt_tokens: int, completion_tokens: int) -> None:
     """Append one usage record (e.g. after each LLM request that has token counts)."""
+    if os.getenv("ENABLE_USER_DATA_STORAGE", "false").lower() not in ("1", "true", "yes"):
+        return
     conn = get_conn()
     try:
         conn.execute(
@@ -183,6 +185,9 @@ def create_edit_event(
       - change_type: create|modify|delete
       - old_content, new_content
     """
+    if os.getenv("ENABLE_USER_DATA_STORAGE", "false").lower() not in ("1", "true", "yes"):
+        return -1
+
     ts = time.time()
     prompt_hash = _sha256_text(prompt) if prompt else None
     chunk_ids_json: Optional[str] = None

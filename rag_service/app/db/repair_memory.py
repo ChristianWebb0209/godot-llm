@@ -149,6 +149,8 @@ def create_lint_fix_record(
     explanation: str,
     model: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if os.getenv("ENABLE_USER_DATA_STORAGE", "false").lower() not in ("1", "true", "yes"):
+        return {"ok": False, "error": "storage_disabled"}
     init_repair_memory_db()
     ts = time.time()
     e_type, e_msg, _sig = normalize_error(raw_lint_output)

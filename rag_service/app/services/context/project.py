@@ -550,34 +550,19 @@ def build_related_files_context(
     max_files: int = 4,
 ) -> List[Tuple[str, str]]:
     """
-    One-hop structural proximity: repo-index-derived related files, or heuristic deps.
+    One-hop structural proximity from heuristics.
+
+    NOTE: The plugin now provides one-hop `related_res_paths` client-side.
+    This function remains as a stateless fallback (no SQLite indexing).
     Returns list of (res_path, content).
     """
-    try:
-        index_repo(project_root_abs=project_root_abs, reason="context_builder")
-    except Exception:
-        deps = extract_structural_deps(active_file_text)
-        related: List[Tuple[str, str]] = []
-        for p in deps:
-            if len(related) >= max_files:
-                break
-            if p == active_file_res_path:
-                continue
-            content = read_project_file(project_root_abs, p)
-            if content:
-                related.append((p, content))
-        return related
-
-    deps = get_related_res_paths(
-        project_root_abs=project_root_abs,
-        active_file_res_path=active_file_res_path,
-        max_outbound=max(8, max_files * 3),
-        max_inbound=max(4, max_files),
-    )
-    related = []
+    deps = extract_structural_deps(active_file_text)
+    related: List[Tuple[str, str]] = []
     for p in deps:
         if len(related) >= max_files:
             break
+        if p == active_file_res_path:
+            continue
         content = read_project_file(project_root_abs, p)
         if content:
             related.append((p, content))

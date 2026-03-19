@@ -5,7 +5,8 @@ import logging
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple, Literal
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -13,16 +14,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from .rag_core import SourceChunk, get_collections
 from .services.repo_indexing import (
     get_inbound_refs,
     get_most_referenced_res_paths,
     get_repo_index_stats,
     list_indexed_paths,
 )
-from .services.agent_deps import GodotQueryDeps
-from .services.godot_agent import create_godot_agent
+from .tools.deps import GodotQueryDeps
 from .tools import (
+    create_godot_agent,
     dispatch_tool_call,
     get_openai_tools_payload,
     get_registered_tools,
@@ -69,7 +69,12 @@ from .services.context.openviking_context import (
     find_memories as openviking_find_memories,
 )
 from .services.console_service import dim as _dim, cyan as _cyan, green as _green, yellow as _yellow
-from .prompts import COMPOSER_SYSTEM_PROMPT
+from .prompts import (
+    COMPOSER_SYSTEM_PROMPT,
+    COMPOSER_V2_SYSTEM_PROMPT_AGENT,
+    COMPOSER_V2_SYSTEM_PROMPT_ASK,
+    GODOT_AGENT_SYSTEM_PROMPT,
+)
 
 
 load_dotenv()  # Load environment variables from .env if present.
@@ -119,7 +124,24 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Godot RAG Service", version="0.1.0", lifespan=lifespan)
-init_db()
+# NOTE: The Godot plugin is responsible for persisting state (usage, edit history, lint repair memory, and repo proximity).
+# To keep this backend stateless, we do not initialize SQLite-backed state at startup.
+
+
+class SourceChunk(BaseModel):
+    """
+    Minimal snippet metadata used in responses.
+
+    NOTE: Older versions of this service used Chroma/Supabase-backed RAG retrieval
+    (see deprecated rag_core.py). That path is now removed; this model remains only
+    to preserve the response shape for 'snippets'.
+    """
+
+    id: str = ""
+    source_path: str = ""
+    score: float = 0.0
+    text_preview: str = ""
+    metadata: Dict[str, Any] = {}
 
 
 _openai_client: Optional[OpenAI] = None
@@ -179,7 +201,8 @@ def _log_llm_input(model: str, context: str, input_payload: Any) -> None:
             if isinstance(m, dict) and "content" in m:
                 c = m.get("content")
                 total_chars += len(str(c)) if c else 0
-    print(_dim(f"llm request model={model} context={context} messages={n_msgs} chars≈{total_chars}"))
+    # Keep this line strictly ASCII so Windows consoles don't crash on encode.
+    print(_dim(f"llm request model={model} context={context} messages={n_msgs} chars~{total_chars}"))
 
 
 def _log_rag_request(method_label: str, client_host: str, question: str, color_fn: Any = _green) -> None:
@@ -242,6 +265,8 @@ class QueryRequest(BaseModel):
     api_key: Optional[str] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
+    # Composer v2 mode contract. When omitted, defaults to "agent".
+    composer_mode: Optional[Literal["agent", "ask"]] = None
 
 
 class QueryResponse(BaseModel):
@@ -263,36 +288,43 @@ class QueryResponseWithTools(QueryResponse):
 
 def _parse_composer_response(content: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
-    Parse Godot Composer (fine-tuned) model output. Expects optional text plus an optional
-    JSON array of tool_calls at the end: [{"name": "...", "arguments": {...}}, ...].
-    Returns (answer_text, list of {"name", "arguments"} dicts).
+    Parse Godot Composer (fine-tuned) model output using the Composer v2 XML tool-call contract.
+
+    Tool calls are expressed as one or more XML blocks:
+      <tool_call>{"name": "tool_name", "arguments": {...}}</tool_call>
+
+    Returns (answer_text_without_tool_blocks, raw_tool_calls)
     """
     content = (content or "").strip()
     if not content:
         return "", []
 
-    # Find the last line or block that looks like a JSON array of tool calls.
     tool_calls: List[Dict[str, Any]] = []
-    answer = content
-    # Try to find a JSON array in the content (often at the end after a newline).
-    for start in range(len(content) - 1, -1, -1):
-        if content[start] != "[":
+
+    # Extract all <tool_call>...</tool_call> blocks.
+    # The inner content should be JSON with keys {name, arguments}.
+    block_pattern = r"<tool_call>\s*(.*?)\s*</tool_call>"
+    for inner in re.findall(block_pattern, content, flags=re.DOTALL):
+        inner_str = inner.strip()
+        if not inner_str:
             continue
         try:
-            parsed = json.loads(content[start:])
-            if isinstance(parsed, list) and len(parsed) > 0:
-                if all(
-                    isinstance(t, dict) and "name" in t and isinstance(t.get("arguments"), (dict, type(None)))
-                    for t in parsed
-                ):
-                    tool_calls = [
-                        {"name": str(t["name"]), "arguments": t.get("arguments") or {}}
-                        for t in parsed
-                    ]
-                    answer = content[:start].strip()
-                    break
-        except (json.JSONDecodeError, TypeError):
-            pass
+            payload = json.loads(inner_str)
+        except json.JSONDecodeError:
+            continue
+
+        name = payload.get("name")
+        args = payload.get("arguments") or {}
+        if not name:
+            continue
+        if not isinstance(args, dict):
+            args = {}
+        tool_calls.append({"name": str(name), "arguments": args})
+
+    # Remove tool blocks from the displayed answer.
+    answer = re.sub(block_pattern, "", content, flags=re.DOTALL).strip()
+    # Strip <think> blocks from user-visible text.
+    answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.DOTALL).strip()
     return answer, tool_calls
 
 
@@ -387,11 +419,9 @@ def _call_llm_with_rag(
     system_prompt = (
         "You are a Godot 4.x development assistant. "
         "You receive a user question plus retrieved documentation and real project code. "
-        "The 'docs' collection is scraped from the official Godot manuals and is the "
-        "authoritative source for engine behavior and APIs. The 'project_code' collection "
-        "contains example scripts and shaders from a wide range of different open-source repos "
-        "(not the user's project); they may reference project-specific types, addons, or paths. "
-        "Treat them only as patterns and inspiration, not as canonical definitions or as code from the user's project. "
+        "Documentation snippets are the authoritative source for engine behavior and APIs. "
+        "Example project code snippets are patterns/inspiration only and may reference project-specific types/addons/paths. "
+        "Treat example snippets as non-canonical guidance: do not assume they exist in the user's project. "
         "Use ONLY the provided context to answer. Prefer documentation when there is any "
         "conflict between docs and project code. Prefer higher-importance code snippets "
         "when multiple examples are relevant, but you may also rely on lower-importance "
@@ -446,7 +476,7 @@ def _call_llm_with_rag(
             completion_tokens=completion_tokens,
             context="rag_answer",
         )
-        record_usage(model, prompt_tokens, completion_tokens)
+        # Usage persistence is handled client-side in the Godot plugin.
 
     return completion.choices[0].message.content or ""
 
@@ -532,35 +562,33 @@ def _run_query_with_tools(
 
     related_files: List[Tuple[str, str]] = []
     if project_root_abs and active_file_path and active_file_text:
-        related_files = build_related_files_context(
-            project_root_abs=project_root_abs,
-            active_file_res_path=active_file_path,
-            active_file_text=active_file_text,
-            max_files=4,
-        )
-    # Prepend project core (most-referenced) files so the model always sees e.g. Player.
-    if project_root_abs:
+        provided_related_res_paths = None
         try:
-            core_paths = get_most_referenced_res_paths(
-                project_root_abs=project_root_abs,
-                limit=5,
-                edge_types=("instances_scene", "attaches_script"),
-            )
-            seen_paths = {p for p, _ in related_files}
-            core_entries: List[Tuple[str, str]] = []
-            for res_path in core_paths:
-                if res_path in seen_paths:
-                    continue
-                content = read_project_file(project_root_abs, res_path)
-                if content:
-                    core_entries.append(
-                        (res_path, f"--- Project core (most referenced): {res_path} ---\n{content}")
-                    )
-                    seen_paths.add(res_path)
-            max_related_total = 8
-            related_files = (core_entries + related_files)[:max_related_total]
+            if isinstance(extra, dict):
+                provided_related_res_paths = extra.get("related_res_paths")
         except Exception:
-            pass
+            provided_related_res_paths = None
+
+        if isinstance(provided_related_res_paths, list) and len(provided_related_res_paths) > 0:
+            # Plugin computes one-hop structural proximity client-side.
+            # We only need to read the provided res:// paths and embed their text.
+            max_files = 4
+            for p in provided_related_res_paths[:max_files]:
+                p_str = str(p).strip()
+                if not p_str or p_str == active_file_path:
+                    continue
+                content = read_project_file(project_root_abs, p_str)
+                if content:
+                    related_files.append((p_str, content))
+        else:
+            # Fallback: server-side structural proximity (may index repo with SQLite).
+            related_files = build_related_files_context(
+                project_root_abs=project_root_abs,
+                active_file_res_path=active_file_path,
+                active_file_text=active_file_text,
+                max_files=4,
+            )
+    # Project core (most-referenced) is omitted in stateless mode.
 
     # Current scene scripts: parse open scene .tscn and attach all scripts in that scene (aggressive context).
     current_scene_scripts: List[Tuple[str, str]] = []
@@ -576,18 +604,8 @@ def _run_query_with_tools(
         except Exception:
             pass
 
-    # Recency working set (SQLite): include the most recent diffs as lightweight context.
+    # Recent edits working set (previously SQLite-backed) is omitted in stateless mode.
     recent_edits_text: List[str] = []
-    try:
-        recent = list_recent_file_changes(limit_edits=30, max_files=6)
-        for r in recent:
-            recent_edits_text.append(
-                f"Edit #{r['edit_id']} ({r['trigger']}): {r['summary']}\n"
-                f"File: {r['file_path']} ({r['change_type']}, +{r['lines_added']} -{r['lines_removed']})\n"
-                f"{r['diff']}"
-            )
-    except Exception:
-        pass
 
     # Build dedicated ENVIRONMENT block (high priority, never dropped).
     environment_parts: List[str] = []
@@ -666,6 +684,8 @@ def _run_query_with_tools(
     )
     environment_text = "\n".join(environment_parts) if environment_parts else None
 
+    system_prompt = GODOT_AGENT_SYSTEM_PROMPT
+    is_obscure = False
     optional_extras: List[str] = []
     if context_language:
         optional_extras.append(f"Preferred language: {context_language}")
@@ -758,19 +778,17 @@ def _run_query_with_tools(
             "- 'Assignment is not allowed inside an expression': You cannot assign and use in the same expression; split into two statements or fix the invalid syntax."
         )
         optional_extras.append(gd4_rules)
-    # Repair memory: if lint/errors are present, retrieve past fixes for the same normalized signature.
-    if errors_text and engine_version:
-        try:
-            fixes = search_lint_fixes(
-                engine_version=str(engine_version),
-                raw_lint_output=str(errors_text),
-                limit=3,
-            )
-            block = format_fixes_for_prompt(fixes)
-            if block:
-                optional_extras.append(block)
-        except Exception:
-            pass
+    # Client-owned lint repair memory:
+    # The plugin computes `context.extra.lint_repair_memory` locally and injects it here.
+    # This keeps the hosted backend stateless (no SQLite-backed repair-memory queries).
+    try:
+        extra = request_context.extra if request_context else {}
+        if isinstance(extra, dict):
+            lint_repair_memory = extra.get("lint_repair_memory")
+            if isinstance(lint_repair_memory, str) and lint_repair_memory.strip():
+                optional_extras.append(lint_repair_memory.strip())
+    except Exception:
+        pass
 
     # Component/class context: when the user has a node type selected, inject its docs so the LLM knows properties for modify_attribute.
     # Include base class docs for custom/obscure types (e.g. class_name Player extends CharacterBody2D -> also fetch CharacterBody2D docs).
@@ -856,7 +874,7 @@ def _run_query_with_tools(
                 completion_tokens=int(total_completion_tokens),
                 context="query_with_tools",
             )
-            record_usage(model, int(total_prompt_tokens), int(total_completion_tokens))
+            # Usage persistence is handled client-side in the Godot plugin.
     # OpenViking: commit this turn for memory extraction (fire-and-forget).
     if chat_id and answer:
         try:
@@ -869,7 +887,7 @@ def _run_query_with_tools(
             )
         except Exception:
             pass
-    return answer, docs + code_snippets, tool_call_results, {
+    return answer, [], tool_call_results, {
         "model": usage_obj.model,
         "limit_tokens": usage_obj.limit_tokens,
         "estimated_prompt_tokens": usage_obj.estimated_prompt_tokens,
@@ -886,11 +904,11 @@ def _run_composer_query(
     api_key: Optional[str] = None,
     base_url: Optional[str] = None,
     model_override: Optional[str] = None,
+    composer_mode: Optional[Literal["agent", "ask"]] = None,
 ) -> Tuple[str, List[SourceChunk], List[ToolCallResult], Dict[str, Any]]:
     """
-    Godot Composer: single-turn call to a fine-tuned model that outputs tool_calls
-    directly (no RAG, no tool loop). Uses same payload as /query; returns same shape.
-    Model response is parsed for a JSON array of {name, arguments} at the end of content.
+    Godot Composer v2: single-turn call to a fine-tuned model that outputs tool calls directly
+    (no RAG, no tool loop). Parses <tool_call>...</tool_call> blocks.
     """
     client, model = _openai_client_and_model(
         api_key=api_key, base_url=base_url, model=model_override
@@ -904,7 +922,10 @@ def _run_composer_query(
         )
 
     extra = (request_context.extra or {}) if request_context else {}
-    system_prompt = COMPOSER_SYSTEM_PROMPT
+    mode = composer_mode or "agent"
+    system_prompt = (
+        COMPOSER_V2_SYSTEM_PROMPT_ASK if mode == "ask" else (COMPOSER_V2_SYSTEM_PROMPT_AGENT or COMPOSER_SYSTEM_PROMPT)
+    )
     user_parts: List[str] = [question]
     if extra.get("active_file_text"):
         user_parts.append("Current file content:\n" + str(extra["active_file_text"]))
@@ -950,7 +971,8 @@ def _run_composer_query(
     prompt_tokens = getattr(usage, "prompt_tokens", None) or getattr(usage, "input_tokens", None) or 0
     completion_tokens = getattr(usage, "completion_tokens", None) or getattr(usage, "output_tokens", None) or 0
     if usage:
-        record_usage(model, int(prompt_tokens), int(completion_tokens))
+        # Usage persistence is handled client-side in the Godot plugin.
+        pass
     answer, raw_tool_calls = _parse_composer_response(content)
     tool_results: List[ToolCallResult] = [
         ToolCallResult(tool_name=tc["name"], arguments=tc.get("arguments") or {}, output=None)
@@ -1009,24 +1031,20 @@ class IndexStatusResponse(BaseModel):
 @app.get("/index_status", response_model=IndexStatusResponse)
 async def index_status(project_root: Optional[str] = None) -> IndexStatusResponse:
     """
-    Return indexing facts: Chroma collection counts and optional repo index stats.
-    If project_root is provided (query param), also return repo index file/edge counts.
+    Return indexing facts for optional repo index stats.
+
+    NOTE: Legacy support: older versions also reported Chroma collection counts for
+    docs/project_code via rag_core.get_collections(). That retrieval path is now
+    deprecated and removed; chroma_* fields are always 0.
     """
-    docs_c, code_c = get_collections()
-    chroma_docs = int(docs_c.count()) if docs_c is not None else 0
-    chroma_project_code = int(code_c.count()) if code_c is not None else 0
     out = IndexStatusResponse(
-        chroma_docs=chroma_docs,
-        chroma_project_code=chroma_project_code,
+        chroma_docs=0,
+        chroma_project_code=0,
     )
+    # Deprecated: the Godot plugin now owns repo proximity indexing.
+    # We keep this endpoint for backward compatibility with older UI versions.
     if project_root and project_root.strip():
-        root = project_root.strip()
-        stats = get_repo_index_stats(root)
-        if "error" in stats:
-            out.repo_index_error = str(stats["error"])
-        else:
-            out.repo_index_files = stats.get("files", 0)
-            out.repo_index_edges = stats.get("edges", 0)
+        out.repo_index_error = "Deprecated: repo index stats are client-side in the Godot plugin."
     return out
 
 
@@ -1065,54 +1083,14 @@ class LintFixIn(BaseModel):
 
 @app.post("/lint_memory/record_fix")
 async def lint_memory_record_fix(payload: LintFixIn) -> Dict[str, Any]:
-    # Explanation: best-effort. If no LLM, store a simple fallback.
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
-    client = get_openai_client()
-    explanation = "Recorded diff that resolved this lint output."
-
-    if client is not None:
-        try:
-            # Keep this prompt short; it is internal only.
-            prompt = (
-                "You are summarizing a fix that resolved a Godot linter failure.\n"
-                f"Engine: {payload.engine_version}\n"
-                f"File: {payload.file_path}\n"
-                "Lint output:\n"
-                f"{payload.raw_lint_output}\n\n"
-                "Describe in 1-2 sentences what changed and the rule it implies, focusing on Godot 4.x GDScript correctness."
-            )
-            completion = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "Be concise and specific. No fluff."},
-                    {"role": "user", "content": prompt},
-                ],
-            )
-            explanation = (completion.choices[0].message.content or "").strip() or explanation
-        except Exception:
-            pass
-
-    rec = create_lint_fix_record(
-        project_root_abs=payload.project_root_abs,
-        file_path=payload.file_path,
-        engine_version=payload.engine_version,
-        raw_lint_output=payload.raw_lint_output,
-        old_content=payload.old_content,
-        new_content=payload.new_content,
-        explanation=explanation,
-        model=model if client is not None else None,
-    )
-    return {"ok": True, "record": rec}
+    # Deprecated: lint repair memory is stored locally in the Godot plugin (user://).
+    return {"ok": False, "error": "deprecated: lint_memory is client-owned"}
 
 
 @app.get("/lint_memory/search")
 async def lint_memory_search(engine_version: str, raw_lint_output: str, limit: int = 3) -> Dict[str, Any]:
-    results = search_lint_fixes(
-        engine_version=str(engine_version),
-        raw_lint_output=str(raw_lint_output),
-        limit=int(limit),
-    )
-    return {"ok": True, "results": results}
+    # Deprecated: lint repair memory is stored locally in the Godot plugin (user://).
+    return {"ok": False, "results": []}
 
 
 class LintRequest(BaseModel):
@@ -1212,23 +1190,14 @@ async def run_lint(payload: LintRequest) -> Dict[str, Any]:
 
 @app.post("/edit_events/create")
 async def edit_events_create(payload: EditEventIn) -> Dict[str, Any]:
-    edit_id = create_edit_event(
-        actor=payload.actor,
-        trigger=payload.trigger,
-        summary=payload.summary,
-        prompt=payload.prompt,
-        changes=[c.model_dump() for c in payload.changes],
-        semantic_summary=payload.semantic_summary,
-        lint_errors_before=payload.lint_errors_before,
-        lint_errors_after=payload.lint_errors_after,
-        retrieved_chunk_ids=payload.retrieved_chunk_ids,
-    )
-    return {"ok": True, "edit_id": edit_id}
+    # Deprecated: edit history is stored locally in the Godot plugin (user://).
+    return {"ok": False, "error": "deprecated: edit_events are client-owned"}
 
 
 @app.get("/edit_events/list")
 async def edit_events_list(limit: int = 500) -> Dict[str, Any]:
-    return {"ok": True, "events": list_edit_events(limit=int(limit))}
+    # Deprecated: edit history is stored locally in the Godot plugin (user://).
+    return {"ok": False, "events": []}
 
 
 @app.get("/usage")
@@ -1237,66 +1206,35 @@ async def usage() -> Dict[str, Any]:
     Return aggregated token usage and estimated cost (from usage_log).
     Used by the Edit History tab to show tokens and cost at the bottom.
     """
-    totals = get_usage_totals()
-    cost_usd = 0.0
-    by_model = totals.get("by_model") or {}
-    for model, counts in by_model.items():
-        cost_usd += _estimate_cost_usd(
-            model,
-            counts.get("prompt_tokens", 0),
-            counts.get("completion_tokens", 0),
-        )
+    # Deprecated: token usage is tracked locally in the Godot plugin (user://).
     return {
-        "ok": True,
-        "total_prompt_tokens": totals.get("total_prompt_tokens", 0),
-        "total_completion_tokens": totals.get("total_completion_tokens", 0),
-        "total_tokens": totals.get("total_prompt_tokens", 0) + totals.get("total_completion_tokens", 0),
-        "estimated_cost_usd": round(cost_usd, 4),
-        "by_model": by_model,
+        "ok": False,
+        "total_prompt_tokens": 0,
+        "total_completion_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "by_model": {},
     }
 
 
 @app.get("/edit_events/{edit_id}")
 async def edit_events_get(edit_id: int) -> Dict[str, Any]:
-    e = get_edit_event(int(edit_id))
-    if not e:
-        return {"ok": False, "error": "not_found"}
-    return {"ok": True, "event": e}
+    # Deprecated: edit history is stored locally in the Godot plugin (user://).
+    return {"ok": False, "error": "deprecated: edit_events are client-owned"}
 
 
 @app.post("/edit_events/undo/{edit_id}", response_model=UndoResponse)
 async def edit_events_undo(edit_id: int) -> UndoResponse:
-    e = get_edit_event(int(edit_id))
-    if not e:
-        return UndoResponse(tool_calls=[])
-
-    tool_calls: List[ToolCallResult] = []
-    for ch in e.get("changes", []):
-        path = ch.get("file_path", "")
-        old_content = ch.get("old_content", "") or ""
-        if not path:
-            continue
-        # Undo by restoring previous content.
-        tool_output = {"execute_on_client": True, "action": "write_file", "path": path, "content": old_content}
-        tool_calls.append(
-            ToolCallResult(
-                tool_name="write_file",
-                arguments={"path": path, "content": old_content},
-                output=tool_output,
-            )
-        )
-
-    return UndoResponse(tool_calls=tool_calls)
+    # Deprecated: undo is handled locally in the Godot plugin.
+    return UndoResponse(tool_calls=[])
 
 
 @app.post("/query", response_model=QueryResponseWithTools)
 async def query_rag(payload: QueryRequest, request: Request) -> QueryResponseWithTools:
     """
     RAG endpoint that:
-    - Searches Godot docs (if indexed) in ChromaDB.
-    - Searches project code in ChromaDB, preferring higher-importance snippets.
-    - Expands to lower-importance code if the area looks more obscure
-      (i.e. we don't find enough high-tier hits).
+    - Uses retrieved documentation + example project code snippets (vector retrieval is removed in this repo).
+    - Builds a context window and answers the question.
     """
     client_host = request.client.host if request.client else "unknown"
     _log_rag_request("POST /query", client_host, payload.question or "", _cyan)
@@ -1304,16 +1242,19 @@ async def query_rag(payload: QueryRequest, request: Request) -> QueryResponseWit
     question = payload.question.strip()
     context_language = payload.context.language if payload.context else None
 
-    answer, snippets, tool_calls, context_usage = _run_query_with_tools(
-        question=question,
-        context_language=context_language,
-        request_context=payload.context,
-        top_k=payload.top_k,
-        max_tool_rounds=payload.max_tool_rounds if payload.max_tool_rounds is not None else 5,
-        api_key=payload.api_key,
-        base_url=payload.base_url,
-        model_override=payload.model,
-    )
+    def run():
+        return _run_query_with_tools(
+            question=question,
+            context_language=context_language,
+            request_context=payload.context,
+            top_k=payload.top_k,
+            max_tool_rounds=payload.max_tool_rounds if payload.max_tool_rounds is not None else 5,
+            api_key=payload.api_key,
+            base_url=payload.base_url,
+            model_override=payload.model,
+        )
+
+    answer, snippets, tool_calls, context_usage = await asyncio.to_thread(run)
 
     return QueryResponseWithTools(
         answer=answer,
@@ -1389,6 +1330,7 @@ async def composer_query(payload: QueryRequest, request: Request) -> QueryRespon
         api_key=payload.api_key,
         base_url=payload.base_url,
         model_override=payload.model,
+        composer_mode=payload.composer_mode,
     )
     return QueryResponseWithTools(
         answer=answer,
@@ -1416,6 +1358,7 @@ async def composer_query_stream_with_tools(payload: QueryRequest, request: Reque
             api_key=payload.api_key,
             base_url=payload.base_url,
             model_override=payload.model,
+            composer_mode=payload.composer_mode,
         )
 
     answer, snippets, tool_calls, context_usage = await asyncio.to_thread(run)
@@ -1451,6 +1394,7 @@ async def composer_query_stream(payload: QueryRequest, request: Request):
             api_key=payload.api_key,
             base_url=payload.base_url,
             model_override=payload.model,
+            composer_mode=payload.composer_mode,
         )
 
     answer, _, _, _ = await asyncio.to_thread(run)
@@ -1547,7 +1491,7 @@ async def query_stream(payload: QueryRequest, request: Request):
                 completion_tokens=int(completion_tokens),
                 context="query_stream",
             )
-            record_usage(model, int(prompt_tokens), int(completion_tokens))
+            # Usage persistence is handled client-side in the Godot plugin.
 
     return StreamingResponse(stream_iter(), media_type="text/plain; charset=utf-8")
 
