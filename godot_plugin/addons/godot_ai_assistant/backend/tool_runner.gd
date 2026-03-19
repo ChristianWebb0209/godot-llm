@@ -320,7 +320,7 @@ func run_editor_actions_async(
 	if collected_lint_after.size() > 0:
 		effective_lint_after = "\n\n".join(collected_lint_after)
 	if edit_records.size() > 0:
-		await _dock.log_edit_event_to_backend(
+		_dock.log_edit_event_to_backend(
 			edit_records, effective_trigger, effective_prompt, effective_lint_before, effective_lint_after
 		)
 	if skipped > 0:

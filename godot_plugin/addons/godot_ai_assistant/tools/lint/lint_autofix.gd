@@ -18,10 +18,18 @@ static func lint_and_autofix_return_ok(
 			if not first_failure_output.is_empty():
 				var final_after := GodotAIServerLint.read_text_res(res_path)
 				if not final_after.is_empty() and final_after != original_before_any_fix:
-					await dock.get_backend_api().post_lint_fix_to_backend(
-						res_path, first_failure_output, original_before_any_fix, final_after,
-						dock.get_last_tool_prompt()
-					)
+					var store = dock.get_lint_memory_store()
+					if store != null:
+						var engine_version := Engine.get_version_info().get("string")
+						store.record_fix(
+							str(engine_version),
+							res_path,
+							first_failure_output,
+							original_before_any_fix,
+							final_after,
+							"Recorded lint repair memory from successful lint autofix.",
+							"",
+						)
 			return true
 		var lint_output: String = lint_out if not lint_out.is_empty() else "Lint failed but produced no output."
 		if first_failure_output.is_empty():
@@ -56,14 +64,33 @@ static func lint_and_autofix_return_ok(
 
 
 static func lint_and_autofix(dock: GodotAIDock, res_path: String, max_rounds: int) -> void:
+	var original_before_any_fix := GodotAIServerLint.read_text_res(res_path)
+	var first_failure_output := ""
 	for attempt in range(max_rounds):
 		var lint := await GodotAIServerLint.run_lint(dock, res_path)
 		var ok: bool = lint.get("ok", false)
 		var lint_out := str(lint.get("output", "")).strip_edges()
 		if ok:
+			if not first_failure_output.is_empty():
+				var final_after := GodotAIServerLint.read_text_res(res_path)
+				if not final_after.is_empty() and final_after != original_before_any_fix:
+					var store = dock.get_lint_memory_store()
+					if store != null:
+						var engine_version := Engine.get_version_info().get("string")
+						store.record_fix(
+							str(engine_version),
+							res_path,
+							first_failure_output,
+							original_before_any_fix,
+							final_after,
+							"Recorded lint repair memory from successful lint autofix.",
+							"",
+						)
 			return
 
 		var lint_output: String = lint_out if not lint_out.is_empty() else "Lint failed but produced no output."
+		if first_failure_output.is_empty():
+			first_failure_output = lint_output
 		var fix_question := (
 			"Fix the lint errors in this file and only change what is necessary.\n"
 			+ "Godot reports one error at a time. Lint will be re-run after each fix. If more errors remain, you will receive another message with the next error. Fix the current error; more may follow.\n\n"

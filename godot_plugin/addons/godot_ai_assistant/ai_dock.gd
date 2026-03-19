@@ -74,6 +74,9 @@ var _editor_interface: EditorInterface = null
 var _tool_executor: GodotAIEditorToolExecutor = null
 var _settings: GodotAISettings = null
 var _edit_store: GodotAIEditStore = null
+var _usage_store = null
+var _lint_memory_store = null
+var _repo_index_store = null
 var _decorator: GodotAIEditorDecorator = null
 var _diff_review: GodotAIDiffReview = null
 var _backend_api: GodotAIBackendAPI = null
@@ -94,7 +97,7 @@ var _tool_follow_up: GodotAIToolFollowUp = null
 var _editor_chrome: GodotAIEditorChrome = null
 var _chat_ux: GodotAIChatUX = null
 var _history_events: Array = []
-var _selected_history_edit_id: int = -1
+var _selected_history_edit_id: String = ""
 var _ask_icon_idle: Texture2D = null
 var _ask_icon_busy: Texture2D = null
 var _selected_pending_id: String = ""
@@ -155,6 +158,11 @@ func set_editor_interface(e: EditorInterface) -> void:
 	_settings.set_editor_interface(e)
 	_edit_store = GodotAIEditStore.new()
 	_edit_store.load_from_disk()
+	_usage_store = preload("res://addons/godot_ai_assistant/core/stores/usage_store.gd").new()
+	_usage_store.load_from_disk()
+	_lint_memory_store = preload("res://addons/godot_ai_assistant/core/stores/lint_memory_store.gd").new()
+	_lint_memory_store.load_from_disk()
+	_repo_index_store = preload("res://addons/godot_ai_assistant/core/stores/repo_index_store.gd").new()
 	if _chat_session_store == null:
 		_chat_session_store = GodotAIChatSessionStore.new()
 	_decorator = GodotAIEditorDecorator.new(e, _edit_store)
@@ -285,6 +293,15 @@ func get_settings() -> GodotAISettings:
 func get_edit_store() -> GodotAIEditStore:
 	return _edit_store
 
+func get_usage_store():
+	return _usage_store
+
+func get_lint_memory_store():
+	return _lint_memory_store
+
+func get_repo_index_store():
+	return _repo_index_store
+
 func get_chat_renderer() -> GodotAIChatRenderer:
 	return _chat_renderer
 
@@ -381,10 +398,10 @@ func get_history_events() -> Array:
 func set_history_events_arr(a: Array) -> void:
 	_history_events = a
 
-func get_selected_history_edit_id() -> int:
+func get_selected_history_edit_id() -> String:
 	return _selected_history_edit_id
 
-func set_selected_history_edit_id(i: int) -> void:
+func set_selected_history_edit_id(i: String) -> void:
 	_selected_history_edit_id = i
 
 func get_selected_pending_id() -> String:
@@ -426,6 +443,10 @@ func handle_backend_query_response(data: Dictionary) -> void:
 	var usage_raw = data.get("context_usage", null)
 	if typeof(usage_raw) == TYPE_DICTIONARY and get_current_chat() >= 0 and get_current_chat() < get_chats().size():
 		get_chats()[get_current_chat()]["context_usage"] = usage_raw
+		if _usage_store != null:
+			var model := str(usage_raw.get("model", ""))
+			var est_prompt := int(usage_raw.get("estimated_prompt_tokens", 0))
+			_usage_store.record_usage(model, est_prompt, 0)
 		_chat_ux.update_context_usage_label()
 		if context_viewer_panel and context_viewer_panel.visible:
 			_refresh_context_viewer_panel()
@@ -547,7 +568,9 @@ func log_edit_event_to_backend(
 	lint_errors_before: String = "",
 	lint_errors_after: String = ""
 ) -> void:
-	await _backend_api.log_edit_event_to_backend(edit_records, trigger, prompt, lint_errors_before, lint_errors_after)
+	# Edit history is client-owned (stored in Godot user:// via GodotAIEditStore).
+	# Keep rag_service stateless by not calling /edit_events/*.
+	return
 
 
 func _set_status(t: String) -> void:
@@ -1112,7 +1135,8 @@ func _apply_editor_decorations() -> void:
 
 
 func _log_edit_event_to_backend(edit_records: Array, trigger: String = "tool_action", prompt: String = "", lint_errors_before: String = "", lint_errors_after: String = "") -> void:
-	await _backend_api.log_edit_event_to_backend(edit_records, trigger, prompt, lint_errors_before, lint_errors_after)
+	# Edit history is client-owned (GodotAIEditStore). No server persistence needed.
+	return
 
 
 func _should_lint_path(path: String) -> bool:

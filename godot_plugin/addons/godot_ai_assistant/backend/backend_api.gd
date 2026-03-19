@@ -34,12 +34,40 @@ func query_backend_for_tools(
 	if not ctx.has("extra"):
 		ctx["extra"] = {}
 	ctx["extra"] = (ctx["extra"] as Dictionary).duplicate()
+
+	# Repair memory (lint repair suggestions) is client-owned:
+	# - plugin computes it from local lint_memory_store
+	# - backend app/main injects it into the context without querying its own SQLite.
+	if not lint_output.is_empty():
+		var store = _dock.get_lint_memory_store()
+		if store != null:
+			var engine_version = Engine.get_version_info().get("string")
+			var fixes = store.search_fixes(str(engine_version), lint_output, 3)
+			var block = store.format_fixes_for_prompt(fixes)
+			if not block.is_empty():
+				(ctx["extra"] as Dictionary)["lint_repair_memory"] = block
+
+	# Repo index (structural proximity) is client-owned:
+	# plugin computes one-hop related res:// paths and sends them to the backend,
+	# which uses them instead of querying SQLite-backed repo_indexing.
+	var active_file_res_path = str(ctx.get("current_script", ""))
+	if not active_file_res_path.is_empty():
+		var repo_store = _dock.get_repo_index_store()
+		if repo_store != null:
+			var related_paths = repo_store.get_related_res_paths_one_hop(active_file_res_path, 4)
+			if related_paths.size() > 0:
+				(ctx["extra"] as Dictionary)["related_res_paths"] = related_paths
+
 	if exclude_keys.size() > 0:
 		ctx["extra"]["exclude_block_keys"] = exclude_keys
 	var chat_id: String = _dock.get_current_chat_id()
 	if not chat_id.is_empty():
 		ctx["extra"]["chat_id"] = chat_id
 	var payload: Dictionary = _build_query_payload(question, ctx, settings)
+	# Composer v2 requires an explicit mode so the model knows whether to emit tool calls.
+	# query_backend_for_tools always executes tool calls, so we default to AGENT mode.
+	if (profile.profile_id == GodotAIBackendProfile.PROFILE_GODOT_COMPOSER):
+		payload["composer_mode"] = "agent"
 	var body := JSON.stringify(payload)
 	var data = await GodotAIBackendClient.query_json(
 		_dock, endpoint, HTTPClient.METHOD_POST, body

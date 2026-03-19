@@ -123,6 +123,31 @@ func deferred_send_question(
 		context["extra"]["lint_output"] = lint_output_override
 	elif _dock._last_lint_path and str(current_script) == str(_dock._last_lint_path) and not _dock._last_lint_output.is_empty():
 		context["extra"]["lint_output"] = _dock._last_lint_output
+
+	# Repair memory (lint repair suggestions) is computed locally in the plugin.
+	# If we have lint_output in the context, we search the local lint memory store
+	# and inject `lint_repair_memory` into the context extras.
+	var lint_out_for_memory = str((context["extra"] as Dictionary).get("lint_output", ""))
+	if not lint_out_for_memory.is_empty():
+		var store = _dock.get_lint_memory_store()
+		if store != null:
+			var engine_version = Engine.get_version_info().get("string")
+			var fixes = store.search_fixes(str(engine_version), lint_out_for_memory, 3)
+			var block = store.format_fixes_for_prompt(fixes)
+			if not block.is_empty():
+				context["extra"]["lint_repair_memory"] = block
+
+	# Repo index (structural proximity) is client-owned:
+	# plugin computes one-hop related res:// paths and sends them in context.extra,
+	# so backend can avoid SQLite-backed repo_indexing queries.
+	var active_file_res_path = str(context.get("current_script", ""))
+	if not active_file_res_path.is_empty():
+		var repo_store = _dock.get_repo_index_store()
+		if repo_store != null:
+			var related_paths = repo_store.get_related_res_paths_one_hop(active_file_res_path, 4)
+			if related_paths.size() > 0:
+				context["extra"]["related_res_paths"] = related_paths
+
 	var exclude_keys: Array = _dock.get_current_chat_exclude_context_keys()
 	if exclude_keys.size() > 0:
 		context["extra"]["exclude_block_keys"] = exclude_keys
@@ -142,6 +167,10 @@ func deferred_send_question(
 			payload["model"] = model
 		if settings.openai_base_url.length() > 0:
 			payload["base_url"] = settings.openai_base_url
+	# Composer v2 requires a mode: agent (tool calls) vs ask (no tool calls).
+	# We map this to `use_tools`: when tools are enabled, we expect the model to emit tool_call blocks.
+	if settings and settings.backend_profile_id == GodotAIBackendProfile.PROFILE_GODOT_COMPOSER:
+		payload["composer_mode"] = ("agent" if use_tools else "ask")
 	var json_body: String = JSON.stringify(payload)
 	var profile_id: String = settings.backend_profile_id if settings else GodotAIBackendProfile.PROFILE_RAG
 	var profile := GodotAIBackendProfile.get_profile(profile_id)
@@ -291,6 +320,11 @@ func on_stream_done(full_text: String, error_message: String = "") -> void:
 			var uj := JSON.new()
 			if uj.parse(usage_json) == OK and uj.data is Dictionary and sci >= 0 and sci < _dock.get_chats().size():
 				_dock.get_chats()[sci]["context_usage"] = uj.data
+				var us = _dock.get_usage_store()
+				if us != null:
+					var model := str(uj.data.get("model", ""))
+					var est_prompt := int(uj.data.get("estimated_prompt_tokens", 0))
+					us.record_usage(model, est_prompt, 0)
 				_dock._chat_ux.update_context_usage_label()
 				if _dock.context_viewer_panel and _dock.context_viewer_panel.visible:
 					_dock._refresh_context_viewer_panel()
