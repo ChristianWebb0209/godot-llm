@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
-from ..db import list_edit_events
 from ..services.asset_library import search_asset_library
 from ..services.context import (
     grep_project_files,
@@ -295,23 +294,15 @@ def _tool_find_references_to(args: Dict[str, Any]) -> Dict[str, Any]:
 # --- New tools: get_recent_changes, grep_search, fetch_url, run, scene, node tree, signals, etc. ---
 
 def _tool_get_recent_changes(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Server-only: return last N edit events (what was recently edited)."""
-    limit = min(50, max(1, int(args.get("limit", 20))))
-    events = list_edit_events(limit=limit)
-    summaries = []
-    for e in events:
-        changes = e.get("changes") or []
-        file_paths = [c.get("file_path", "") for c in changes if c.get("file_path")]
-        summaries.append({
-            "id": e.get("id"),
-            "timestamp": e.get("timestamp"),
-            "summary": e.get("summary"),
-            "file_paths": file_paths,
-        })
+    """
+    Deprecated: backend edit history was moved to the Godot plugin.
+
+    The plugin now persists edit timeline + revert locally under `user://` via GodotAIEditStore.
+    """
     return {
-        "success": True,
-        "message": "Last %d edit(s)." % len(summaries),
-        "events": summaries,
+        "success": False,
+        "message": "deprecated: edit history is local-only in the Godot plugin (no backend DB).",
+        "events": [],
     }
 
 
@@ -753,7 +744,10 @@ def get_registered_tools() -> List[ToolDef]:
         # --- Cursor parity + Godot-specific ---
         ToolDef(
             name="get_recent_changes",
-            description="Return the last N edit events (what files were recently created/modified by the AI). Use to see what was just edited.",
+            description=(
+                "Deprecated. Edit history is persisted locally in the Godot plugin (GodotAIEditStore). "
+                "This backend returns an empty result."
+            ),
             parameters={
                 "type": "object",
                 "properties": {

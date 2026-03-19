@@ -78,13 +78,10 @@ Important subpaths:
 - Project pipeline:
   - (Removed) `rag_service/scripts/analyze_project.py` – project code analysis/indexing removed from this repo.
   - `godot_knowledge_base/code/demos/<slug>/` – selected important scripts/shaders.
-- Repo indexing (structural graph):
-  - `rag_service/app/services/repo_indexing.py` – SQLite-backed file/edge index per project.
-  - `rag_service/data/db/repo_index_<repo_id>.db` – per-project DB (avoids lock contention).
-  - `rag_service/scripts/index_repo.py` – CLI to index a Godot project root.
+- Repo proximity (structural graph):
+  - `godot_plugin/addons/godot_ai_assistant/core/stores/repo_index_store.gd` – client-side JSON cache (`user://godot_ai_assistant/repo_index/<repo_id>.json`) for one-hop related `res://` paths.
 - Repair memory (lint fixes):
-  - `rag_service/app/db/repair_memory.py` – SQLite store of lint failure → fix (diff + explanation).
-  - `rag_service/data/db/repair_memory.db` – single DB for all projects.
+  - `godot_plugin/addons/godot_ai_assistant/core/stores/lint_memory_store.gd` – client-side JSON store (`user://godot_ai_assistant/lint_memory/lint_memory.json`) used to inject `context.extra.lint_repair_memory`.
 
 ---
 
@@ -172,7 +169,7 @@ That retrieval is **disabled** in the current `/query` “tools loop” path; th
   - **find_references_to**: `get_inbound_refs()` – files that reference a given res:// path (from repo index edges).
 - **No RAG fetch in query path**: The assistant no longer retrieves from `docs` or `project_code` Chroma collections or exposes search_docs / search_project_code / request_component_context tools (simplified for fine-tuned model).
 - **Editor-action tools** (return `execute_on_client: true`; plugin runs after stream): create_file, write_file, append_to_file, apply_patch, create_script, create_node, delete_file, modify_attribute, lint_file; **run_terminal_command**, **run_godot_headless**, **run_scene** (run.gd); **grep_search** (fs.gd); **get_node_tree** (scene_tree.gd); **get_signals**, **connect_signal** (signals.gd); **get_export_vars** (inspector.gd); **get_project_settings**, **get_autoloads**, **get_input_map** (project.gd); **check_errors** (editor_errors.gd).
-- **Server-only (no project required)**: **get_recent_changes** (last N edit events from DB), **fetch_url** (HTTP GET), **search_asset_library** (Godot Asset Library API). When `project_root_abs` is set, **grep_search**, **get_project_settings**, **get_autoloads**, **get_input_map** also run on the server.
+- **Server-only (no project required)**: **fetch_url** (HTTP GET), **search_asset_library** (Godot Asset Library API). The backend edit-history tool `get_recent_changes` is deprecated and returns empty results.
 - **Fast tool-call semantics** (minimize tokens): create_file(path) may have empty content (create then write_file); prefer apply_patch over write_file for edits; create_script supports optional `template` (e.g. character_2d, character_3d) for boilerplate; append_to_file for incremental writes. When `project_root_abs` is set, create_file, write_file, apply_patch, and append_to_file run on the server and return `content` in the tool result so the model does not need read_file to verify.
 - **apply_patch**: accepts either (path, old_string, new_string) or (path, diff) with a unified-diff string.
 - **modify_attribute**: `target_type='node'` (scene_path, node_path, attribute, value) or `target_type='import'` (path, attribute, value) for .import [params].
@@ -313,20 +310,21 @@ Vector indexing / ChromaDB collections were removed from this repo, so there is 
 - Block order: System → Current task → Retrieved session memory → Active file → Current scene scripts → Related files → Recent edits → Errors → Optional extras.
 - **Conversation history**: Plugin sends `context.extra.conversation_history` (last N user/assistant turns). Backend calls `build_conversation_context()` and appends to optional extras so the model has multi-turn continuity.
 - **Active file**: Plugin sends `current_script` and `extra.active_file_text`; always sends `extra.project_root_abs`. If active file text is missing, backend reads from disk.
-- **Related files**: When `project_root_abs` is set, uses repo index `get_related_res_paths` (outbound + inbound) and “project core” (`get_most_referenced_res_paths`), then reads those files into the Related files block. One-off index run if project not indexed (§8).
-- **Repair memory**: When `errors_text` or `lint_output` is present, `search_lint_fixes` adds “Past lint fixes” to extras (§9).
-- **Recency**: Recent file diffs from SQLite as lightweight context.
+- **Related files**: The Godot plugin may send `context.extra.related_res_paths` (one-hop `res://` dependencies). The backend embeds those files into the “Related files” context block; it does not require SQLite-based repo indexing.
+- **Repair memory**: The plugin computes `context.extra.lint_repair_memory` locally (from `lint_memory_store.gd`) and injects it into the request extras; the backend includes it directly (no SQLite query).
+- **Recency**: SQLite-backed recent diffs are omitted in stateless mode.
 - Over-budget blocks are compressed (key symbols + head/tail) rather than randomly truncated. Backend logs `[llm_input]` for debugging.
 
 ---
 
-## 8. Repo indexing (SQLite)
+## 8. Repo proximity (client-side)
 
-- **Purpose**: Graph of “what files exist” and “how they’re connected” (scenes → scripts, scripts → res:// refs, project.godot → main/autoload) for context and exploration without Chroma.
-- **Storage**: Per-project DB `rag_service/app/repo_index_<repo_id>.db`. Schema: `repos`, `index_runs`, `files` (path_rel, kind, language, …), `edges` (src_rel, dst_res, edge_type).
-- **Indexing**: `index_repo(project_root_abs, ...)` walks project files, parses .godot/.tscn for edges; incremental (mtime/size). CLI: `python scripts/index_repo.py --project-root "C:\path\to\Project"`.
-- **Context**: `get_related_res_paths(project_root_abs, active_file_res_path, max_outbound, max_inbound)` → res:// paths for “Related files” block. `get_most_referenced_res_paths` → “project core” paths.
-- **Tools**: `list_indexed_paths(project_root_abs, prefix, max_paths, max_depth)` → paths under prefix for **project_structure**. `get_inbound_refs(project_root_abs, target_res_path, limit)` → files that reference target for **find_references_to**.
+- **Purpose**: Pick “nearby” project files (one-hop structural dependencies) so the backend can assemble a better context window without Chroma/SQLite.
+- **Storage**: Cached JSON per project stored by the Godot plugin:
+  - `godot_plugin/addons/godot_ai_assistant/core/stores/repo_index_store.gd`
+  - `user://godot_ai_assistant/repo_index/<repo_id>.json`
+- **Indexing**: On-demand. When a file is active, the store reads it and extracts `res://...` references, then uses those references for one-hop related selection.
+- **Context flow**: The plugin injects `context.extra.related_res_paths` (list of `res://` paths). The backend embeds those files’ text into the “Related files” context block.
 
 ---
 
@@ -349,7 +347,7 @@ Vector indexing / ChromaDB collections were removed from this repo, so there is 
 ## 11. Implementation notes
 
 - **Streaming + tools**: `query_stream_with_tools` streams answer, then `__TOOL_CALLS__` + JSON, then `__USAGE__`. Backend-resolved tools (read_file, list_files, list_directory, search_files, read_import_options, project_structure, find_scripts_by_extends, find_references_to when `project_root_abs` set) are already executed; only `execute_on_client: true` tools are run in Godot after the stream.
-- **project_root_abs**: Plugin sends it in `context.extra`. Backend uses it for server-side file/exploration tools, context (active file, related files, repo index), repair memory, edit_events. Open Godot from the **project folder** (e.g. `godot_plugin`), not repo root.
+- **project_root_abs**: Plugin sends it in `context.extra`. Backend uses it for server-side file/exploration tools and for embedding the active/related file context it receives from the plugin. Open Godot from the **project folder** (e.g. `godot_plugin`), not repo root.
 - **Tabs**: Tab logic uses **child node name** (e.g. `Settings`, `History`), not index, so drag-reorder works. Chat tabs: connect `active_tab_rearranged` and reorder `_chats` to match.
 - **Editor decorations**: Use `EditorInterface.get_file_system_dock()` / `get_script_editor()`; match script tabs via `get_open_scripts()[i].resource_path`; `call_deferred("_apply_editor_decorations")` so docks exist. Paths: normalize to `res://`; `ProjectSettings.globalize_path("res://")` for project root.
 - **GDScript 4**: No `NodePath.trim_prefix`/`path_join`—use `str(node_path).trim_prefix(...)`. No bare `_` as discard—use e.g. `var _x := ...`. Use `get_node_or_null()` for optional nodes so one bad path doesn’t block plugin load.

@@ -27,18 +27,6 @@ from .tools import (
     get_openai_tools_payload,
     get_registered_tools,
 )
-from .db import (
-    create_edit_event,
-    create_lint_fix_record,
-    format_fixes_for_prompt,
-    get_edit_event,
-    get_usage_totals,
-    init_db,
-    list_edit_events,
-    list_recent_file_changes,
-    record_usage,
-    search_lint_fixes,
-)
 from .services.context.context_builder import (
     build_context_usage,
     build_current_scene_scripts_context,

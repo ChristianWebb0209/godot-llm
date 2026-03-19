@@ -51,9 +51,9 @@ These are separate concerns. Do not store repo index inside OpenViking.
 
 If you want a lightweight hosted RAG DB without running separate infra:
 
-- Use **Supabase Postgres + pgvector** for embeddings.
-- Keep one schema for documents/chunks and store embeddings in a `vector` column.
-- Expose a single “retrieve top_k” RPC or SQL query used by `rag_service`.
+- This repo no longer includes vector DB integration for hosted runtime retrieval.
+- Retrieval is handled via plugin-provided active/related context (and lightweight server heuristics).
+- If you add a vector DB later, it must remain stateless with respect to user projects/chats.
 
 If you do not want any hosted DB at all:
 
@@ -118,8 +118,8 @@ Operationally:
   - model id
   - question + minimal context
 - Retrieval source (choose one):
-  - Supabase pgvector (recommended), or
-  - existing local vector store for self-host/dev only.
+  - Plugin-provided context + lightweight server heuristics (current repo behavior).
+  - (Optional future work) A stateless hosted vector DB integration.
 - Ensure server does not persist request payloads by default (log hygiene).
 
 ### Phase 4 — optional “local backend extras”
